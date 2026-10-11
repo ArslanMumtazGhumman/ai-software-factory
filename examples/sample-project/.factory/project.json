@@ -1,0 +1,13 @@
+{
+  "id": "todo-cli",
+  "name": "Todo CLI",
+  "description": "A small command-line todo list manager that stores items in a local JSON file.",
+  "goals": [
+    "Add, list and complete todo items from the command line",
+    "Persist todos between runs"
+  ],
+  "constraints": [
+    "Node.js and TypeScript only",
+    "No network access"
+  ]
+}

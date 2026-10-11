@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "projectRoot": ".",
+  "dataDir": ".factory",
+  "limits": {
+    "maxRetries": 2,
+    "maxTasksPerRun": 1,
+    "commandTimeoutMs": 60000,
+    "maxOutputBytes": 65536,
+    "agentTimeoutMs": 1800000
+  },
+  "allowedExecutables": ["node"],
+  "commands": {
+    "node-version": {
+      "executable": "node",
+      "args": ["--version"],
+      "description": "Smoke check that the Node.js runtime is available"
+    }
+  },
+  "agent": {
+    "type": "claude-code",
+    "executable": "claude",
+    "permissionMode": "plan",
+    "allowedTools": ["Read", "Glob", "Grep"]
+  }
+}

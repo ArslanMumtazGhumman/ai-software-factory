@@ -1,0 +1,18 @@
+// Public API of the AI Software Factory orchestrator foundation.
+export * from './core/errors.js';
+export * from './config/factoryConfig.js';
+export * from './project/projectSpec.js';
+export * from './tasks/task.js';
+export * from './tasks/dependencyGraph.js';
+export * from './tasks/taskSelector.js';
+export * from './tasks/taskLifecycle.js';
+export * from './persistence/jsonFile.js';
+export * from './persistence/projectRepository.js';
+export * from './agents/codingAgent.js';
+export * from './agents/promptBuilder.js';
+export * from './agents/claudeCodeAdapter.js';
+export * from './testing/commandPolicy.js';
+export * from './testing/commandRunner.js';
+export * from './orchestrator/orchestrator.js';
+export { isInside, resolveInside } from './security/paths.js';
+export { redactSecrets, buildSafeEnv } from './security/redact.js';

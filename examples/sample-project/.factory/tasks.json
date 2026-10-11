@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "Define the todo data model",
+      "description": "Create a TypeScript type for a todo item with id, text, done and createdAt fields.",
+      "dependencies": [],
+      "acceptanceCriteria": [
+        "A Todo type is exported from src/todo.ts",
+        "Unit tests cover construction of a todo"
+      ],
+      "status": "pending",
+      "retryCount": 0,
+      "results": []
+    },
+    {
+      "id": "T2",
+      "title": "Persist todos to a JSON file",
+      "description": "Implement load and save functions for the todo list using a JSON file in the working directory.",
+      "dependencies": ["T1"],
+      "acceptanceCriteria": [
+        "Saving then loading returns the same todos",
+        "A missing file loads as an empty list"
+      ],
+      "status": "pending",
+      "retryCount": 0,
+      "results": []
+    },
+    {
+      "id": "T3",
+      "title": "Add the command-line interface",
+      "description": "Provide add, list and done commands that use the persistence layer.",
+      "dependencies": ["T1", "T2"],
+      "acceptanceCriteria": [
+        "todo add <text> adds an item",
+        "todo list prints all items",
+        "todo done <id> marks an item complete"
+      ],
+      "status": "pending",
+      "retryCount": 0,
+      "results": []
+    }
+  ]
+}
