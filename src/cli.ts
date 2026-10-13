@@ -10,6 +10,10 @@ import type { AutoRunRecord, TaskCounts } from './persistence/autoRunStore.js';
 import { FileLock } from './persistence/fileLock.js';
 import { ProjectRepository } from './persistence/projectRepository.js';
 import { redactSecrets } from './security/redact.js';
+import { CliRunLauncher } from './dashboard/launcher.js';
+import { loadProjects } from './dashboard/projects.js';
+import { DEFAULT_PORT, startDashboardServer, type DashboardServer } from './dashboard/server.js';
+import { DashboardService } from './dashboard/service.js';
 
 const USAGE = `AI Software Factory
 
@@ -42,6 +46,10 @@ Autonomous runs (requires "autonomy.enabled": true):
   auto show [autoRunId]            Executions and events of a run
   auto failures [autoRunId]        Failure details: agent result, checks, repairs, findings
 
+Dashboard:
+  dashboard [--port N]             Local web dashboard on http://127.0.0.1:N/ (default ${DEFAULT_PORT}).
+                                   Repeat --config to show several projects. Stop it with Ctrl+C.
+
 Other:
   record <taskId> <success|failure> <summary...>
                                    Record the result of a manual attempt
@@ -50,12 +58,16 @@ Other:
 
 Options:
   --config <path>                  Config file (default: factory.config.json)
+  --port <N>                       Dashboard port, 1024-65535 (dashboard only)
 `;
 
 interface ParsedArgs {
   command: string;
   positionals: string[];
   configPath: string;
+  /** Every --config given, in order (the dashboard can show several projects). */
+  configPaths: string[];
+  port?: number;
   noDiff: boolean;
   maxTasks?: number;
   retryFailed: boolean;
@@ -64,6 +76,8 @@ interface ParsedArgs {
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const positionals: string[] = [];
   let configPath = 'factory.config.json';
+  const configPaths: string[] = [];
+  let port: number | undefined;
   let noDiff = false;
   let maxTasks: number | undefined;
   let retryFailed = false;
@@ -73,6 +87,13 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       const value = argv[++i];
       if (value === undefined) throw new UsageError('--config requires a path');
       configPath = value;
+      configPaths.push(value);
+    } else if (arg === '--port') {
+      const value = argv[++i];
+      if (value === undefined || !/^[0-9]{4,5}$/.test(value) || Number(value) < 1024 || Number(value) > 65535) {
+        throw new UsageError('--port requires a number from 1024 to 65535');
+      }
+      port = Number(value);
     } else if (arg === '--no-diff') {
       noDiff = true;
     } else if (arg === '--retry-failed') {
@@ -89,7 +110,16 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       positionals.push(arg);
     }
   }
-  return { command: positionals.shift() ?? 'help', positionals, configPath, noDiff, retryFailed, ...(maxTasks !== undefined ? { maxTasks } : {}) };
+  return {
+    command: positionals.shift() ?? 'help',
+    positionals,
+    configPath,
+    configPaths,
+    noDiff,
+    retryFailed,
+    ...(maxTasks !== undefined ? { maxTasks } : {}),
+    ...(port !== undefined ? { port } : {}),
+  };
 }
 
 class UsageError extends Error {}
@@ -165,6 +195,8 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
+  if (args.port !== undefined && args.command !== 'dashboard') throw new UsageError('--port applies to "dashboard" only');
+  if (args.command === 'dashboard') return runDashboard(args);
 
   const config = await loadFactoryConfig(args.configPath);
   const repository = new ProjectRepository(config.dataDir);
@@ -341,6 +373,36 @@ async function main(argv: readonly string[]): Promise<number> {
     default:
       throw new UsageError(`Unknown command "${args.command}". Run "factory help".`);
   }
+}
+
+async function runDashboard(args: ParsedArgs): Promise<number> {
+  if (args.positionals.length > 0) throw new UsageError('Usage: dashboard [--config <path>]... [--port N]');
+  const log = (line: string) => out(`[dashboard] ${redactSecrets(line)}`);
+  const projects = await loadProjects(args.configPaths.length > 0 ? args.configPaths : [args.configPath]);
+  const service = new DashboardService(projects, { launcher: new CliRunLauncher() });
+  let dashboard: DashboardServer;
+  try {
+    dashboard = await startDashboardServer({ service, ...(args.port !== undefined ? { port: args.port } : {}), log });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      throw new UsageError(`Port ${args.port ?? DEFAULT_PORT} is already in use. Is the dashboard already running? Otherwise choose another with --port.`);
+    }
+    throw err;
+  }
+  out(`AI Software Factory dashboard: ${dashboard.url}`);
+  out(`Listening on 127.0.0.1 only. Projects: ${projects.map((p) => p.config.projectRoot).join(', ')}`);
+  out('Open the address above in your browser. Press Ctrl+C to stop the dashboard (runs it started keep running).');
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      out('Stopping the dashboard...');
+      void dashboard.close().then(resolve);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  return 0;
 }
 
 async function runAuto(args: ParsedArgs, runner: AutonomousRunner): Promise<number> {

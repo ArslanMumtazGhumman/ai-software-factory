@@ -3,7 +3,7 @@
 A local, reusable orchestrator that will eventually take an approved product idea
 through planning, implementation, testing and deployment.
 
-**Current state: milestone 3, bounded autonomous runs.** The factory can:
+**Current state: milestone 4, local web dashboard.** The factory can:
 
 - store a project specification and its tasks as JSON,
 - validate the task dependency graph (unknown ids, duplicates, self-dependencies, cycles),
@@ -18,10 +18,13 @@ through planning, implementation, testing and deployment.
   it, verify it, and continue only when the task is completed under the configured review
   policy. The run stops with a recorded reason and the next action when a person is needed, a
   limit is reached, or nothing is left. It can be paused, resumed, stopped and recovered.
-- run named, allowlisted commands from project configuration.
+- run named, allowlisted commands from project configuration,
+- show projects, tasks, runs, evidence and activity in a **local web dashboard** (127.0.0.1
+  only), and start, pause, resume and stop runs and accept or reject results from it, using
+  the same operations and safety checks as the CLI (milestone 4).
 
 It does **not** merge into your branches, push, publish or deploy anything, coordinate multiple
-agents, or provide a dashboard.
+agents, or offer any remote access.
 
 ## Requirements
 
@@ -81,6 +84,7 @@ Run the CLI with `node dist\src\cli.js <command> --config <path>`. The default c
 | `auto failures [autoRunId]` | Failure details: agent result, failing check output, repairs, findings, worktree | No |
 | `record <taskId> <success\|failure> <summary...>` | Records a manual attempt (not for supervised runs) | Yes |
 | `run-check <name>` | Runs a command from the config's `commands` section in the project root | No |
+| `dashboard [--port N]` | Local web dashboard for one or more projects (repeat `--config`); see "Dashboard" | Only through its controls |
 | `help` | Usage | No |
 
 Exit codes: `0` success, `1` error or failed execution (printed as `Error [CODE]: ...`), `2` usage error.
@@ -401,8 +405,111 @@ Each autonomous run is recorded in `<dataDir>\autoruns\<autoRunId>\autorun.json`
 
 Full evidence for each execution (agent output tail, check output, repairs, findings, hashes)
 stays in `runs\<runId>\run.json`. Everything is redacted before it is written, and no
-environment variables are stored. The formats are plain JSON with `schemaVersion: 1`, intended to
-be read by a later dashboard.
+environment variables are stored. The formats are plain JSON with `schemaVersion: 1`; the
+dashboard reads them directly.
+
+## Dashboard
+
+A local web page for managing projects, watching autonomous runs and reviewing results without
+typing CLI commands. It is a thin layer over the existing orchestrator: every view is read from
+the factory's own JSON files, and every button calls the same operation as the matching CLI
+command, with the same locking, git isolation, command allowlist, limits and budget checks. The
+dashboard has no database and keeps no task state of its own.
+
+### Start and stop it (Windows CMD)
+
+```cmd
+cd C:\path\to\ai-software-factory
+npm run build
+node dist\src\cli.js dashboard --config C:\path\to\project\factory.config.json
+```
+
+It prints `AI Software Factory dashboard: http://127.0.0.1:4317/`. Open that address in your
+browser (Edge, Chrome or Firefox).
+
+- **Several projects:** repeat `--config` (up to 20), e.g.
+  `node dist\src\cli.js dashboard --config C:\a\factory.config.json --config C:\b\factory.config.json`.
+- **Another port:** `--port 4400` (1024-65535). If the port is busy you get a clear error.
+- **Stop it:** press **Ctrl+C** in its CMD window (or close the window). Stopping the dashboard
+  does **not** stop an autonomous run it started: runs execute in their own process. Use the
+  Stop button (or `auto stop`) for that.
+- **Keep it running in the background:** `start "factory dashboard" /min node dist\src\cli.js dashboard --config ...`,
+  and stop it by closing that window.
+
+A page loaded from an earlier dashboard process stops working after a restart (each launch
+uses a new access token); reload the page.
+
+### What it shows
+
+| Page | Contents |
+| --- | --- |
+| Overview | Number of projects; active runs and their current task; **estimated** usage (Claude Code's reported cost, marked *incomplete* when any call did not report it); actual charges, which are shown as *not available* because the factory has no billing data |
+| Project | Name and location; run status and controls; tabs for **Tasks**, **Runs**, **Activity**, **Specification** and **Configuration** (read-only, environment variable names and values hidden) |
+| Tasks | ID, title, status, dependencies, retries, latest check results, and why a task is not eligible (e.g. `waiting on dependencies: T1`); filters by status, *ready to run* and *blocked* |
+| Task | Description, acceptance criteria, blockers, attempt history, and the latest execution's evidence: agent exit status, duration and summary, each check with the tail of its (redacted) output, repair attempts, changed files, review findings, branch, worktree and commits |
+| Review | For a result awaiting review: agent summary, checks, changed files, findings, integrity warnings, the recorded diff, and **Accept** / **Reject** |
+| Run | Current task and stage, every execution (result, agent exit, duration, checks, repairs, cost, branch and commit, evidence), budget, budget events, stop reason and next step, remaining tasks, the run's event log, and the redacted output of the last runner process started from the dashboard |
+| Activity | Timeline of runs started, paused and stopped, tasks selected, completed and failed, validation failures, repairs, budget stops, recovery events and accept/reject decisions, with filters |
+
+The page polls one small status endpoint every 5 seconds (every 30 seconds when the tab is in
+the background, with back-off when the server is unreachable) and reloads a view only when that
+project's state changed. Refreshing does not run any command.
+
+### Controls
+
+- **Start run…** shows the configured task limit, run and task timeouts, repair and retry
+  limits, per-call and run budgets, checks and auto-accept policy, and asks for confirmation.
+  You can lower the task limit for that run; nothing can be raised. The run is started as
+  `node dist\src\cli.js auto start --config <file>` in its own process (fixed arguments, no
+  shell), exactly as from CMD. Its output goes to `<dataDir>\autoruns\dashboard-launches\`.
+- **Pause** and **Stop…** write the runner's control request, like `auto pause` / `auto stop`.
+  Both take effect between tasks: a task in progress finishes and its result is kept. Stop
+  needs confirmation; a stopped run cannot be resumed.
+- **Resume…** continues a paused run with the limits it was started with (`auto resume`).
+- **Accept…** / **Reject…** call the existing review operations. The dashboard sends back the run
+  id and diff hash of the result you were shown, so a decision never applies to a different
+  result; acceptance then re-verifies the worktree, evidence and diff exactly like `accept`
+  (a changed worktree is refused with `TAMPER_DETECTED`). Reject requires a reason and keeps the
+  worktree, branch and evidence.
+
+A button is disabled, with the reason shown, when the action cannot apply: autonomy or
+execution is disabled in the config, Claude Code is not found on `PATH`, another factory process
+holds the lock, a run is already active, or the runner process died (then run `recover` from CMD
+first; the dashboard does not offer it). Each confirmed action is sent once: the button is
+disabled while it runs, a repeated request with the same id returns the first result, and only
+one start or resume per project can be in progress. There is no button that marks a task
+completed or bypasses review.
+
+### Security
+
+The dashboard can launch an AI coding agent that changes source code, so it is locked down:
+
+- It listens on **127.0.0.1 only**; there is no option to listen on other interfaces.
+- Requests whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` are refused
+  (protection against DNS rebinding).
+- Every API request needs a random token created at each launch and embedded in the page, which
+  other websites cannot read. State-changing requests must also be `POST`s with a JSON body from
+  the dashboard's own origin (`Origin` and `Sec-Fetch-Site` are checked); no CORS is granted.
+- Read-only requests (`GET`) never change state; actions are only accepted as `POST`.
+- All input is validated: project ids are opaque (never paths), task and run ids must match the
+  factory's formats, bodies are limited to 16 KB and may contain only the expected fields. Limits,
+  budgets, policies, commands and paths cannot be sent at all.
+- Projects come only from the `--config` files given at startup. Each is validated by the normal
+  config loader, its real (link-resolved) data directory must be inside its project root, and no
+  two projects may share a data directory. There is no endpoint that accepts a filesystem path,
+  a URL or a shell command.
+- Responses never include environment variables, raw agent output or the full output of commands;
+  everything shown is redacted again before it is sent. Unexpected errors return a generic
+  message (details go to the dashboard's CMD window, redacted).
+- Pages are served with a strict Content-Security-Policy (no inline scripts, no framing).
+
+### Dashboard limitations
+
+- No `recover` button: after a crash, run `node dist\src\cli.js recover --config <file>` in CMD.
+- No remote access and no user accounts. Anyone who can run programs as you on this computer
+  could also use the dashboard (just as they could use the CLI).
+- Supervised single-task `execute` is not offered in the dashboard; use the CLI.
+- The cost shown is Claude Code's own estimate (`total_cost_usd`), not an Anthropic bill.
 
 ## Recovery procedures
 
@@ -575,6 +682,7 @@ Unknown setting names and out-of-range values are rejected rather than ignored.
   worktrees\<runId>\                   isolated working copy (kept after every run)
   autoruns\<autoRunId>\autorun.json    autonomous run history
   autoruns\<autoRunId>\control.json    the last pause/stop request
+  autoruns\dashboard-launches\         output of runs started from the dashboard
   stale-locks\                         archived locks from crashed processes
   .gitignore                           written once; ignores the local state above
 ```
@@ -649,6 +757,10 @@ other git-ignored files that are not part of the diff. Any warning also prevents
 - **Cost limits are not a hard spending guarantee.** The run cap is based on Claude Code's
   reported `total_cost_usd`, and the per-call cap is enforced by Claude Code, not by the
   factory. See "Cost budget".
+- **State files on Windows.** Windows cannot replace a file while another process has it open
+  (for example `auto status`, the dashboard or a virus scanner reading it). The factory then
+  retries the replacement for up to 30 seconds before reporting an error. The dashboard's
+  5-second status check only reads file timestamps, so leaving it open does not cause this.
 - **Pause and stop take effect between tasks.** A running task (including its repairs) finishes
   first. Ctrl+C on Windows also interrupts the Claude Code child process.
 - **Process-tree kill on Windows** uses `taskkill /T`, which follows parent/child links.

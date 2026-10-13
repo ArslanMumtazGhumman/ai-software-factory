@@ -43,6 +43,32 @@ export async function writeJsonFileAtomic(filePath: string, data: unknown): Prom
   await writeTextFileAtomic(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
+const RENAME_RETRY_CODES = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_RETRY_MS = 30_000;
+
+/**
+ * Windows refuses to replace a file while another process (e.g. `auto status`
+ * or the dashboard, or a virus scanner) has it open, failing with
+ * EPERM/EACCES/EBUSY. Readers hold the file only for a moment, so retry with a
+ * short backoff (as graceful-fs does) before giving up; a real permission
+ * problem still fails, just later.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  let delay = 5;
+  for (let waited = 0; ; ) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      if (process.platform !== 'win32' || !RENAME_RETRY_CODES.has(code) || waited >= RENAME_RETRY_MS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      waited += delay;
+      delay = Math.min(delay * 2, 100);
+    }
+  }
+}
+
 /** Atomic text write (same temp-file-then-rename strategy as writeJsonFileAtomic). */
 export async function writeTextFileAtomic(filePath: string, text: string): Promise<void> {
   const dir = path.dirname(filePath);
@@ -50,7 +76,7 @@ export async function writeTextFileAtomic(filePath: string, text: string): Promi
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(tempPath, text, { encoding: 'utf8', flag: 'wx' });
-    await rename(tempPath, filePath);
+    await renameWithRetry(tempPath, filePath);
   } catch (err) {
     // Only ever removes the temp file this call created; never the target.
     await unlink(tempPath).catch(() => undefined);

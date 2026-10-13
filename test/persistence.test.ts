@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { open, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { DependencyError, PersistenceError, ValidationError } from '../src/core/errors.js';
@@ -84,5 +84,17 @@ describe('JSON persistence', () => {
     await assert.rejects(repo.saveTasks([makeTask('A', { dependencies: ['missing'] })]), DependencyError);
     await assert.rejects(repo.saveTasks([{ ...makeTask('B'), title: '' }]), ValidationError);
     assert.equal(await readFile(repo.tasksFile, 'utf8'), before);
+  });
+
+  it('replaces a file that a reader has open (Windows refuses until it is closed)', async () => {
+    const file = path.join(dir, 'state.json');
+    await writeJsonFileAtomic(file, { version: 1 });
+    const reader = await open(file, 'r'); // e.g. the dashboard or "auto status" reading at that moment
+    const write = writeJsonFileAtomic(file, { version: 2 });
+    await new Promise((r) => setTimeout(r, 300));
+    await reader.close();
+    await write;
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { version: 2 });
+    assert.deepEqual((await readdir(dir)).filter((n) => n.endsWith('.tmp')), []);
   });
 });
