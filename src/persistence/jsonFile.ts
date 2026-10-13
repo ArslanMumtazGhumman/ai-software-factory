@@ -40,9 +40,13 @@ export async function readJsonFile<T>(filePath: string, parse: (raw: unknown) =>
  * file. Output is pretty-printed with a trailing newline to keep diffs clean.
  */
 export async function writeJsonFileAtomic(filePath: string, data: unknown): Promise<void> {
+  await writeTextFileAtomic(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+/** Atomic text write (same temp-file-then-rename strategy as writeJsonFileAtomic). */
+export async function writeTextFileAtomic(filePath: string, text: string): Promise<void> {
   const dir = path.dirname(filePath);
   const tempPath = path.join(dir, `.${path.basename(filePath)}.${randomBytes(6).toString('hex')}.tmp`);
-  const text = `${JSON.stringify(data, null, 2)}\n`;
   try {
     await mkdir(dir, { recursive: true });
     await writeFile(tempPath, text, { encoding: 'utf8', flag: 'wx' });

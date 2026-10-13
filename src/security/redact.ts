@@ -25,6 +25,27 @@ export function redactSecrets(text: string, extraSecrets: readonly string[] = []
 }
 
 /**
+ * High-confidence secret formats, used to flag added diff lines. Deliberately
+ * narrower than redaction so ordinary code (e.g. `token: string`) is not flagged.
+ */
+const SECRET_DETECTORS: readonly { name: string; pattern: RegExp }[] = [
+  { name: 'Anthropic API key', pattern: /sk-ant-[A-Za-z0-9_-]{10,}/ },
+  { name: 'sk- style API key', pattern: /\bsk-[A-Za-z0-9]{20,}/ },
+  { name: 'GitHub token', pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/ },
+  { name: 'AWS access key id', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: 'private key block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  {
+    name: 'hard-coded credential',
+    pattern: /\b(password|passwd|secret|api[_-]?key|access[_-]?token)\b\s*[=:]\s*["'][^"'\s]{8,}["']/i,
+  },
+];
+
+/** Names of secret formats found in `text` (empty if none). */
+export function findSecretLikeContent(text: string): string[] {
+  return SECRET_DETECTORS.filter((d) => d.pattern.test(text)).map((d) => d.name);
+}
+
+/**
  * Environment variables passed to child processes. Everything else (API keys,
  * tokens, cloud credentials) is withheld by default.
  */

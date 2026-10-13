@@ -82,6 +82,37 @@ export class AgentExecutionDisabledError extends FactoryError {
   }
 }
 
+/** Another factory process holds the task-store lock. */
+export class LockHeldError extends FactoryError {
+  constructor(message: string) {
+    super('LOCK_HELD', message);
+  }
+}
+
+/** The repository state does not allow a safely isolated execution. */
+export class GitIsolationError extends FactoryError {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super('GIT_ISOLATION_ERROR', message, options);
+  }
+}
+
+/** The configuration does not meet the safety policy required for execution. */
+export class ExecutionPolicyError extends FactoryError {
+  constructor(message: string) {
+    super('EXECUTION_POLICY_ERROR', message);
+  }
+}
+
+/** Reviewed evidence or the reviewed worktree changed after review. */
+export class TamperDetectedError extends FactoryError {
+  readonly problems: readonly string[];
+
+  constructor(problems: readonly string[]) {
+    super('TAMPER_DETECTED', `Reviewed result changed unexpectedly:\n  - ${problems.join('\n  - ')}`);
+    this.problems = problems;
+  }
+}
+
 /** Render any thrown value as a single safe message string. */
 export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;

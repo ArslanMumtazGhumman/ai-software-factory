@@ -1,6 +1,7 @@
 import type { AgentInvocationPlan, CodingAgent } from '../agents/codingAgent.js';
 import type { FactoryConfig } from '../config/factoryConfig.js';
 import { InvalidTransitionError, TaskNotFoundError } from '../core/errors.js';
+import type { FileLock } from '../persistence/fileLock.js';
 import type { ProjectRepository } from '../persistence/projectRepository.js';
 import type { ProjectSpec } from '../project/projectSpec.js';
 import { redactSecrets } from '../security/redact.js';
@@ -18,6 +19,8 @@ export interface OrchestratorDeps {
   now?: () => Date;
   /** Injectable command runner for tests. */
   runCommand?: typeof runCommand;
+  /** Cross-process lock taken around writes to the task store. */
+  lock?: FileLock;
 }
 
 export interface TaskPlan {
@@ -28,9 +31,9 @@ export interface TaskPlan {
 /**
  * Coordinates config, persisted state, task selection and the coding agent.
  *
- * Milestone 1 scope: inspect state, select eligible work, produce dry-run agent
- * plans, record results reported by an operator, and run allowlisted checks.
- * It does NOT loop, execute the agent, or deploy.
+ * Inspects state, selects eligible work, produces dry-run agent plans, records
+ * results reported by an operator, and runs allowlisted checks. Supervised
+ * execution of a single task lives in Supervisor. Nothing here loops or deploys.
  */
 export class Orchestrator {
   private readonly now: () => Date;
@@ -87,9 +90,28 @@ export class Orchestrator {
     taskId: string,
     input: { outcome: ExecutionOutcome; summary: string; error?: string; startedAt?: string },
   ): Promise<Task> {
+    if (this.deps.lock === undefined) return this.recordUnlocked(taskId, input);
+    const handle = await this.deps.lock.acquire(`record ${taskId}`);
+    try {
+      return await this.recordUnlocked(taskId, input);
+    } finally {
+      await handle.release();
+    }
+  }
+
+  private async recordUnlocked(
+    taskId: string,
+    input: { outcome: ExecutionOutcome; summary: string; error?: string; startedAt?: string },
+  ): Promise<Task> {
     const tasks = await this.deps.repository.loadTasks();
     const index = tasks.findIndex((t) => t.id === taskId);
     if (index === -1) throw new TaskNotFoundError(taskId);
+    const runId = tasks[index]!.currentRunId;
+    if (runId !== undefined) {
+      throw new InvalidTransitionError(
+        `Task "${taskId}" belongs to supervised run ${runId}; use review/accept/reject, or recover for an interrupted run.`,
+      );
+    }
     const finishedAt = this.now().toISOString();
     const updated = recordResult(
       tasks[index]!,

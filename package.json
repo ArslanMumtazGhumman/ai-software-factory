@@ -1,7 +1,7 @@
 {
   "name": "ai-software-factory",
   "version": "0.1.0",
-  "description": "Local orchestrator foundation for an AI-assisted software factory (milestone 1).",
+  "description": "Local orchestrator for an AI-assisted software factory (milestone 3: bounded autonomous runs).",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",

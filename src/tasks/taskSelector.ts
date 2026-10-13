@@ -23,6 +23,8 @@ export function evaluateEligibility(task: Task, byId: ReadonlyMap<string, Task>,
       return { eligible: false, reason: 'already completed' };
     case 'in_progress':
       return { eligible: false, reason: 'already in progress' };
+    case 'awaiting_review':
+      return { eligible: false, reason: 'awaiting human review (accept or reject it)' };
     case 'needs_attention':
       return { eligible: false, reason: 'needs human attention (retries exhausted)' };
     case 'failed':
