@@ -79,6 +79,7 @@ const SAFETY_CODES = new Set([
   'DEPENDENCY_ERROR',
   'VALIDATION_ERROR',
   'PERSISTENCE_ERROR',
+  'LIMIT_EXCEEDED',
 ]);
 
 export function countTasks(tasks: readonly Task[]): TaskCounts {
@@ -257,12 +258,6 @@ export class AutonomousRunner {
           break;
         }
 
-        const limitStop = this.checkLimits(record, activeMs());
-        if (limitStop !== undefined) {
-          stop = limitStop;
-          break;
-        }
-
         await this.refreshExecutions(record);
         record.tip = await this.advanceTip(record);
         const tasks = await repository.loadTasks();
@@ -272,6 +267,13 @@ export class AutonomousRunner {
           break;
         }
         const next = gate.next!;
+
+        // Limits are checked only when a task is about to start, so a finished backlog reports all-complete.
+        const limitStop = this.checkLimits(record, activeMs());
+        if (limitStop !== undefined) {
+          stop = limitStop;
+          break;
+        }
 
         const taskDeadline = this.now().getTime() + record.limits.maxTaskDurationMs;
         const runDeadline = this.now().getTime() + (record.limits.maxRunDurationMs - activeMs());
@@ -290,6 +292,7 @@ export class AutonomousRunner {
             baseCommit: record.tip,
             deadline: Math.min(taskDeadline, runDeadline),
             autoRunId: record.autoRunId,
+            ...(record.limits.maxCostUsd !== undefined ? { budgetUsd: record.limits.maxCostUsd - record.costUsd } : {}),
             onRunStarted: async (run) => {
               entry.runId = run.runId;
               entry.baseCommit = run.baseCommit;
@@ -454,8 +457,16 @@ export class AutonomousRunner {
           action,
         };
       }
-      if (record.costUsd >= limits.maxCostUsd) {
-        return { state: 'stopped', reason: 'cost-limit', message: `Cost limit reached ($${record.costUsd.toFixed(4)} of $${limits.maxCostUsd}).`, action };
+      // Never start a task whose first agent call could exceed what is left of the budget.
+      const perCall = this.deps.config.agent.maxBudgetUsd;
+      const remaining = limits.maxCostUsd - record.costUsd;
+      if (perCall === undefined || remaining + 1e-9 < perCall) {
+        return {
+          state: 'stopped',
+          reason: 'cost-limit',
+          message: `Cost limit reached: $${record.costUsd.toFixed(4)} of $${limits.maxCostUsd} used; the $${Math.max(0, remaining).toFixed(4)} left cannot cover another agent call (up to $${perCall ?? 'unbounded'} each).`,
+          action,
+        };
       }
     }
     return undefined;

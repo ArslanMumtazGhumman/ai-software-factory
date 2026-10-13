@@ -183,7 +183,7 @@ export function parseFactoryConfig(raw: unknown, baseDir: string): FactoryConfig
   const autonomy = parseAutonomy(raw.autonomy, issues);
   if (autonomy.enabled && !execution.enabled) issues.push('config.autonomy.enabled requires config.execution.enabled');
   if (autonomy.maxCostUsd !== undefined && agent.maxBudgetUsd === undefined) {
-    issues.push('config.autonomy.maxCostUsd requires config.agent.maxBudgetUsd, so a single agent call cannot overshoot the cap unbounded');
+    issues.push('config.autonomy.maxCostUsd requires config.agent.maxBudgetUsd, the per-call budget every call must fit into');
   }
 
   if (issues.length > 0) throw new ValidationError('Invalid factory config', issues);

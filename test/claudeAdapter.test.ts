@@ -56,6 +56,22 @@ describe('Claude Code adapter', () => {
     assert.ok(!plan.stdin.includes(SECRET));
   });
 
+  it('passes agent.maxBudgetUsd to Claude Code as --max-budget-usd, and omits it when unset', () => {
+    const budgeted = makeConfig(root, { agent: { permissionMode: 'dontAsk', maxBudgetUsd: 1.5 } });
+    const plan = new ClaudeCodeAdapter(budgeted.agent, budgeted.limits, root).plan({ project: sampleProject, task: makeTask('A'), workingDirectory: root });
+    assert.equal(plan.args[plan.args.indexOf('--max-budget-usd') + 1], '1.5');
+    assert.equal(plan.args.filter((a) => a === '--max-budget-usd').length, 1);
+    const { plan: unbudgeted } = adapter(() => result({}));
+    assert.ok(!unbudgeted.args.includes('--max-budget-usd'));
+  });
+
+  it('reads usage only from total_cost_usd; missing or killed runs report no cost', () => {
+    assert.equal(interpretResult(result({ stdout: json({ total_cost_usd: 0.42 }) })).details?.costUsd, 0.42);
+    assert.equal(interpretResult(result({ stdout: json({}) })).details?.costUsd, undefined);
+    assert.equal(interpretResult(result({ stdout: json({ total_cost_usd: '0.42' }) })).details?.costUsd, undefined);
+    assert.equal(interpretResult(result({ timedOut: true, exitCode: null })).details?.costUsd, undefined);
+  });
+
   it('is disabled unless execution is enabled', async () => {
     const { a, plan, calls } = adapter(() => result({}), false);
     await assert.rejects(a.execute(plan), AgentExecutionDisabledError);

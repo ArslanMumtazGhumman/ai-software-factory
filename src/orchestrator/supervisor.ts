@@ -10,6 +10,7 @@ import {
   FactoryError,
   GitIsolationError,
   InvalidTransitionError,
+  LimitExceededError,
   LockHeldError,
   TamperDetectedError,
   TaskNotFoundError,
@@ -79,6 +80,12 @@ export interface ExecuteOptions {
   baseCommit?: string;
   /** Absolute deadline (epoch ms) for agent work on this task, including repairs. */
   deadline?: number;
+  /**
+   * Remaining run cost budget (USD) for this task. Every agent call, including
+   * each repair, may only start when the budget still left covers a full call
+   * at `agent.maxBudgetUsd` and the cost of every earlier call is known.
+   */
+  budgetUsd?: number;
   /** Autonomous run that requested this execution. */
   autoRunId?: string;
   /** Called once the run record exists and the task is in_progress. */
@@ -104,6 +111,9 @@ interface Verification {
   /** Only failed checks with a clean diff review may be repaired. */
   repairable: boolean;
 }
+
+/** Tolerance for floating-point cost sums. */
+const BUDGET_EPSILON = 1e-9;
 
 /** Below this much remaining task time, no new agent invocation is started. */
 const MIN_AGENT_TIME_MS = 10_000;
@@ -177,6 +187,11 @@ export class Supervisor {
   async execute(taskId: string, options: ExecuteOptions = {}): Promise<ExecutionReport> {
     const validation = this.assertExecutionPolicy();
     if (!TASK_ID.test(taskId)) throw new ValidationError(`Invalid task id "${taskId}"`);
+    if (options.budgetUsd !== undefined) {
+      // Refuse before anything changes when the budget cannot cover even the first call.
+      const problem = this.callNotCovered(options.budgetUsd);
+      if (problem !== undefined) throw new LimitExceededError(`Not starting ${taskId}: ${problem}`);
+    }
     return this.withLock(`execute ${taskId}`, options.lock, () => this.executeLocked(taskId, validation, options));
   }
 
@@ -231,7 +246,7 @@ export class Supervisor {
 
     try {
       await options.onRunStarted?.(run);
-      return await this.runAgentAndVerify(project, started, run, validation, options.deadline);
+      return await this.runAgentAndVerify(project, started, run, validation, options.deadline, options.budgetUsd);
     } catch (err) {
       await this.recordUnexpectedFailure(run, err);
       throw err;
@@ -320,6 +335,7 @@ export class Supervisor {
     run: RunRecord,
     validation: ResolvedCommand[],
     deadline: number | undefined,
+    budgetUsd: number | undefined,
   ): Promise<ExecutionReport> {
     const { config } = this.deps;
     const worktree = run.worktreePath!;
@@ -334,6 +350,12 @@ export class Supervisor {
     for (let attempt = 1; verification.repairable && attempt <= maxRepairs; attempt++) {
       if (deadline !== undefined && deadline - this.now().getTime() < MIN_AGENT_TIME_MS) {
         repairNote = '; repair stopped: task time budget exhausted';
+        break;
+      }
+      const budgetProblem = this.budgetBlocksCall(run, budgetUsd);
+      if (budgetProblem !== undefined) {
+        repairNote = `; repair stopped: ${budgetProblem}`;
+        this.log(`Not starting repair attempt ${attempt}: ${budgetProblem}.`);
         break;
       }
       const failed = verification.validation.filter(isFailedCheck);
@@ -399,6 +421,25 @@ export class Supervisor {
     await this.deps.repository.saveTasks(tasks.map((t) => (t.id === task.id ? updated : t)));
     this.log(`Task ${task.id} is now "${updated.status}". Worktree preserved at ${worktree}.`);
     return { runId: run.runId, task: updated, run };
+  }
+
+  /** Why `budgetUsd` cannot cover one more agent call, or undefined when it can. */
+  private callNotCovered(budgetUsd: number): string | undefined {
+    const perCall = this.deps.config.agent.maxBudgetUsd;
+    if (perCall === undefined) return 'a run cost budget requires agent.maxBudgetUsd to bound each call';
+    if (budgetUsd + BUDGET_EPSILON < perCall) {
+      return `run cost budget insufficient ($${Math.max(0, budgetUsd).toFixed(4)} left; each agent call may use up to $${perCall})`;
+    }
+    return undefined;
+  }
+
+  /** Budget check before a further call in this execution: earlier calls' reported costs count against it. */
+  private budgetBlocksCall(run: RunRecord, budgetUsd: number | undefined): string | undefined {
+    if (budgetUsd === undefined) return undefined;
+    const calls = [run.agent, ...(run.repairs ?? []).map((r) => r.agent)].filter((a) => a !== undefined);
+    if (calls.some((a) => a.costUsd === undefined)) return 'the cost of an earlier agent call is unknown, so the run cost budget cannot be enforced';
+    const spent = calls.reduce((sum, a) => sum + (a.costUsd ?? 0), 0);
+    return this.callNotCovered(budgetUsd - spent);
   }
 
   /** Snapshot, run the configured checks (only after a successful agent run) and review the diff. */

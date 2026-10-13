@@ -279,11 +279,39 @@ stop it first.
 | `execution.maxRepairAttempts` | 0 | 0–3 | Repairs within one execution |
 | `autonomy.maxRunDurationMs` | 7200000 (2 h) | 60000–86400000 | Active (not paused) time per run. A new task starts only with at least 30 s left. |
 | `autonomy.maxTaskDurationMs` | 2700000 (45 min) | 10000–14400000 | Per task, including repairs. Bounds every agent timeout. |
-| `autonomy.maxCostUsd` | none | 0.01–500 | Total measured agent cost per run. Requires `agent.maxBudgetUsd`, so the most a run can overshoot is one invocation's budget. If an invocation does not report its cost, the run stops because the cap can no longer be enforced. |
+| `autonomy.maxCostUsd` | none | 0.01–500 | Total reported agent cost per run. Requires `agent.maxBudgetUsd`. See "Cost budget" below. |
 | `limits.agentTimeoutMs` | 1800000 | 10000–14400000 | Hard timeout for each agent invocation |
 
 Budgets are fixed when the run starts and are not reset by `auto resume`. A run that reaches a
 budget is `stopped`; start a new run for a new budget.
+
+### Cost budget
+
+Two settings work together, and they are enforced in different places:
+
+- **Per call: `agent.maxBudgetUsd`** is passed to Claude Code as `--max-budget-usd` (supported by
+  Claude Code 2.1.296 in `--print` mode). Claude Code itself enforces it; the factory does not
+  control how precisely.
+- **Per run: `autonomy.maxCostUsd`** is enforced by the factory. Usage is measured only from the
+  `total_cost_usd` value in Claude Code's JSON result, which is Claude Code's own estimate, not
+  your billing record (with a subscription sign-in it may not correspond to charges at all).
+
+Before **every** agent call, including each repair, the factory requires that the budget still
+left (`maxCostUsd` minus the reported cost so far) is at least `agent.maxBudgetUsd`. Otherwise
+the call does not start:
+
+- before a new task, the run stops with `cost-limit`;
+- before a repair, the repair loop ends and the task is recorded as failed
+  (`... repair stopped: run cost budget insufficient`).
+
+If any call did not report a cost (timeout, crash, unparseable output), the cap can no longer be
+enforced: no further repair starts for that task, and the run stops before the next task.
+
+So, by the factory's own accounting, a run's reported cost stays within `maxCostUsd`, provided
+each call stays within `--max-budget-usd`. This is **not a hard spending guarantee**: it relies
+on Claude Code's cost reporting and on how strictly Claude Code enforces `--max-budget-usd`,
+and a call whose cost was not reported may have spent up to its per-call budget. Use your
+provider's account limits for a real spending ceiling.
 
 ### Review policy and auto-accept
 
@@ -520,7 +548,7 @@ Agent settings:
 | `permissionMode` | `plan` | Execution requires `dontAsk` or `acceptEdits`. `bypassPermissions` and `auto` are rejected. |
 | `tools` | Read, Edit, Write, Glob, Grep | The only tools that exist for the agent. Allowed for execution: Read, Edit, Write, Glob, Grep, NotebookEdit. |
 | `allowedTools` | Read, Glob, Grep | Auto-approved tools; must be a subset of `tools`. |
-| `maxBudgetUsd` | none | Spend cap per invocation (`--max-budget-usd`). Required for `autonomy.maxCostUsd`. |
+| `maxBudgetUsd` | none | Per-call spend cap, passed as `--max-budget-usd` and enforced by Claude Code. Required for `autonomy.maxCostUsd`. |
 | `passEnv` | `[]` | Variable names passed to Claude Code, e.g. `ANTHROPIC_API_KEY` if you authenticate by API key. Their values are redacted from all output. |
 
 Execution settings: `enabled` (default `false`), `validationCommands` (at least one is required),
@@ -618,8 +646,9 @@ other git-ignored files that are not part of the diff. Any warning also prevents
   conservative but cannot understand intent. A listed task whose harmful change avoids every
   keyword and finding could be accepted. Accepted work is never merged into your branch, so it
   is still reviewed when you merge.
-- **The cost cap is checked between invocations.** A run can exceed `maxCostUsd` by at most one
-  invocation's `agent.maxBudgetUsd`.
+- **Cost limits are not a hard spending guarantee.** The run cap is based on Claude Code's
+  reported `total_cost_usd`, and the per-call cap is enforced by Claude Code, not by the
+  factory. See "Cost budget".
 - **Pause and stop take effect between tasks.** A running task (including its repairs) finishes
   first. Ctrl+C on Windows also interrupts the Claude Code child process.
 - **Process-tree kill on Windows** uses `taskkill /T`, which follows parent/child links.

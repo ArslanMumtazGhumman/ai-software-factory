@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import type { AgentRunResult } from '../src/agents/codingAgent.js';
 import { loadFactoryConfig } from '../src/config/factoryConfig.js';
-import { ExecutionPolicyError, InvalidTransitionError, LockHeldError, ValidationError } from '../src/core/errors.js';
+import { ExecutionPolicyError, InvalidTransitionError, LimitExceededError, LockHeldError, ValidationError } from '../src/core/errors.js';
 import { AutonomousRunner } from '../src/orchestrator/autonomousRunner.js';
 import { Supervisor } from '../src/orchestrator/supervisor.js';
 import { AutoRunStore } from '../src/persistence/autoRunStore.js';
@@ -332,24 +332,88 @@ describe('autonomous runner', () => {
       assert.ok(agent.timeouts[0]! <= 15_000 && agent.timeouts[0]! > 10_000, `timeout ${agent.timeouts[0]}`);
     });
 
-    it('stops at the cost limit, and when cost cannot be measured', async () => {
-      const withCost = (cost: number): AgentBehavior => async (cwd, hooks, request) => {
-        const result = await chainAgent(cwd, hooks, request);
-        return { ...result, details: { exitCode: 0, timedOut: false, durationMs: 1, truncated: false, killFailed: false, costUsd: cost, stdout: '', stderr: '' } };
-      };
-      const agentConfig = { permissionMode: 'dontAsk', tools: ['Read', 'Edit', 'Write'], allowedTools: ['Read', 'Edit', 'Write'], maxBudgetUsd: 1 };
-      const costly = await setup(withCost(0.6), { autonomy: { ...AUTONOMY, maxCostUsd: 1 }, config: { agent: agentConfig, commands: TEST_ALL } });
-      const record = await costly.runner.start();
-      assert.equal(record.stop?.reason, 'cost-limit');
-      assert.equal(record.executions.length, 2);
-      assert.equal(record.costUsd, 1.2);
-      await fx!.cleanup();
+  });
 
-      const unknown = await setup(chainAgent, { autonomy: { ...AUTONOMY, maxCostUsd: 1 }, config: { agent: agentConfig, commands: TEST_ALL } });
-      const r2 = await unknown.runner.start();
-      assert.equal(r2.stop?.reason, 'cost-limit');
-      assert.equal(r2.costUnknown, true);
-      assert.equal(r2.executions.length, 1);
+  describe('cost budget', () => {
+    // Each agent call may spend up to agent.maxBudgetUsd ($1); calls only start when the rest of the run budget covers that.
+    const agentConfig = { permissionMode: 'dontAsk', tools: ['Read', 'Edit', 'Write'], allowedTools: ['Read', 'Edit', 'Write'], maxBudgetUsd: 1 };
+    const costed = (cost: number | undefined, behavior: AgentBehavior = chainAgent): AgentBehavior => async (cwd, hooks, request) => {
+      const result = await behavior(cwd, hooks, request);
+      const details = { exitCode: 0, timedOut: false, durationMs: 1, truncated: false, killFailed: false, stdout: '', stderr: '' };
+      return { ...result, details: cost === undefined ? details : { ...details, costUsd: cost } };
+    };
+    const budget = (maxCostUsd: number, execution: Record<string, unknown> = {}) => ({
+      autonomy: { ...AUTONOMY, maxCostUsd },
+      config: { agent: agentConfig, commands: TEST_ALL },
+      execution,
+    });
+    const failsChecks: AgentBehavior = async (cwd) => {
+      await writeFile(path.join(cwd, 'src', 'greet.js'), BAD);
+      return ok();
+    };
+
+    it('stops before a task when the remaining budget cannot cover one more call', async () => {
+      const { agent, runner } = await setup(costed(0.7), budget(2));
+      const record = await runner.start();
+      // $0.70 used: $1.30 left covers a call. $1.40 used: $0.60 left does not.
+      assert.equal(agent.calls.length, 2);
+      assert.equal(record.stop?.reason, 'cost-limit');
+      assert.equal(record.state, 'stopped');
+      assert.ok(Math.abs(record.costUsd - 1.4) < 1e-9);
+      assert.ok(record.costUsd <= 2);
+      assert.match(record.stop!.message, /\$0\.6000 left cannot cover another agent call \(up to \$1 each\)/);
+    });
+
+    it('allows exactly as many calls as the budget covers', async () => {
+      const { agent, runner } = await setup(costed(1), budget(3));
+      const record = await runner.start();
+      assert.equal(agent.calls.length, 3);
+      assert.equal(record.costUsd, 3);
+      assert.equal(record.stop?.reason, 'all-complete');
+    });
+
+    it('checks the budget before every repair, not only between tasks', async () => {
+      const { fx, agent, runner } = await setup(costed(0.9, failsChecks), budget(2, { maxRepairAttempts: 3 }));
+      const record = await runner.start();
+      // Call 1: $0.90 (left $1.10). Repair 1: $1.80 (left $0.20): repair 2 must not start.
+      assert.equal(agent.calls.length, 2);
+      assert.ok(record.costUsd <= 2);
+      assert.equal(record.stop?.reason, 'task-failed');
+      assert.match(record.executions[0]!.failureReason!, /after 1 repair attempt\(s\); repair stopped: run cost budget insufficient \(\$0\.2000 left/);
+      const run = await new RunStore(fx.config.dataDir).load(record.executions[0]!.runId!);
+      assert.equal(run.repairs?.length, 1);
+    });
+
+    it('does not repair when the cost of an earlier call is unknown', async () => {
+      const { agent, runner } = await setup(costed(undefined, failsChecks), budget(3, { maxRepairAttempts: 2 }));
+      const record = await runner.start();
+      assert.equal(agent.calls.length, 1);
+      assert.match(record.executions[0]!.failureReason!, /repair stopped: the cost of an earlier agent call is unknown/);
+      assert.equal(record.costUnknown, true);
+    });
+
+    it('stops before the next task when a call did not report its cost', async () => {
+      const { agent, runner } = await setup(costed(undefined), budget(3));
+      const record = await runner.start();
+      assert.equal(agent.calls.length, 1);
+      assert.equal(record.stop?.reason, 'cost-limit');
+      assert.equal(record.costUnknown, true);
+      assert.match(record.stop!.message, /did not report its cost/);
+    });
+
+    it('repairs are unaffected when no run cost budget is configured', async () => {
+      const { agent } = await setup(costed(0.9, failsChecks), { execution: { maxRepairAttempts: 2 } });
+      const supervisor = new Supervisor({ config: fx!.config, repository: fx!.repository, agent });
+      await supervisor.execute('T1');
+      assert.equal(agent.calls.length, 3);
+    });
+
+    it('execute refuses, without changing anything, when the budget cannot cover the first call', async () => {
+      const { fx, agent, supervisor } = await setup(costed(0.5), budget(3));
+      await assert.rejects(supervisor.execute('T1', { budgetUsd: 0.5 }), (err: unknown) => err instanceof LimitExceededError && /\$0\.5000 left/.test(err.message));
+      assert.equal(agent.calls.length, 0);
+      assert.equal((await tasksOf(fx)).get('T1')!.status, 'pending');
+      assert.equal(await exists(path.join(fx.config.dataDir, 'runs')), false);
     });
   });
 
