@@ -205,6 +205,9 @@ function confirmDialog({ title, body, confirmText, danger, action, validate }) {
 
 function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === 'new') return { view: 'new' };
+  if (parts[0] === 'plans') return { view: 'plans' };
+  if (parts[0] === 'plan' && parts[1]) return { view: 'plan', plan: parts[1], tab: parts[2] || 'proposal' };
   if (parts[0] !== 'p' || !parts[1]) return { view: 'overview' };
   const pid = parts[1];
   if (parts[2] === 't' && parts[3]) return { view: 'task', pid, tid: parts[3] };
@@ -238,6 +241,9 @@ async function render() {
     else if (r.view === 'task') view = await renderTask(r.pid, r.tid);
     else if (r.view === 'review') view = await renderReview(r.pid, r.tid);
     else if (r.view === 'run') view = await renderRun(r.pid, r.rid);
+    else if (r.view === 'new') view = await renderNewIdea();
+    else if (r.view === 'plans') view = await renderPlans();
+    else if (r.view === 'plan') view = await renderPlan(r.plan, r.tab);
   } catch (err) {
     view = h('div', {}, errorBox(err), h('p', {}, h('a', { href: '#/', text: 'Back to overview' })));
   }
@@ -257,7 +263,7 @@ function progressBar(fraction) {
 // ---------------------------------------------------------------- overview
 
 async function renderOverview() {
-  const data = await api('/api/overview');
+  const [data, workspace] = await Promise.all([api('/api/overview'), getWorkspace()]);
   setCrumbs([{ text: 'Overview' }]);
   for (const p of data.projects) projectNames.set(p.id, p.name);
   const est = data.usage.estimated;
@@ -282,7 +288,10 @@ async function renderOverview() {
         h('div', { class: 'label', text: 'Actual charges' }),
         h('div', { class: 'value muted', text: 'Not available' }),
         h('div', { class: 'small muted', text: data.usage.actual.note }))),
-    h('h2', { text: 'Projects' }),
+    h('div', { class: 'controls section' },
+      h('h2', { text: 'Projects' }),
+      h('span', { class: 'spacer' }),
+      workspace.enabled ? h('a', { class: 'btn primary', href: '#/new', text: 'New project from an idea' }) : h('span', { class: 'small muted', text: workspace.reason })),
     table(['Project', 'Location', 'Status', 'Tasks', 'Progress', 'Current run', 'Last activity'],
       data.projects.map((p) => ({
         href: p.status === 'ok' ? `#/p/${enc(p.id)}` : null,
@@ -296,6 +305,7 @@ async function renderOverview() {
           fmtTime(p.lastActivity),
         ],
       }))),
+    workspace.enabled ? [h('h2', { text: 'Ideas and plans' }), await plansTable(5), h('p', {}, h('a', { href: '#/plans', text: 'All plans →' }))] : null,
   );
 }
 
@@ -695,6 +705,332 @@ async function renderRun(pid, rid) {
   );
 }
 
+// ---------------------------------------------------------------- planning
+
+let workspaceInfo = null;
+async function getWorkspace() {
+  if (workspaceInfo === null) workspaceInfo = await api('/api/workspace');
+  return workspaceInfo;
+}
+
+const PLAN_STATE_CLASS = {
+  proposing: 'info', finalizing: 'info', initializing: 'info', proposed: 'warn', 'needs-input': 'warn',
+  'needs-attention': 'err', invalid: 'err', failed: 'err', ready: 'ok', rejected: '',
+};
+const planBadge = (state, interrupted) => (interrupted ? badge('interrupted', 'err') : badge(state, PLAN_STATE_CLASS[state] ?? ''));
+const BASIS_CLASS = { 'user-provided': 'info', verified: 'ok', assumption: 'warn', recommendation: '' };
+const basisBadge = (basis) => badge(basis, BASIS_CLASS[basis] ?? '');
+
+async function plansTable(limit) {
+  const data = await api('/api/plans');
+  const plans = limit ? data.plans.slice(0, limit) : data.plans;
+  return table(['Idea', 'State', 'Created', 'Project'], plans.map((p) => ({
+    href: `#/plan/${enc(p.planId)}`,
+    cells: [
+      h('a', { href: `#/plan/${enc(p.planId)}`, text: p.name }),
+      h('span', {}, planBadge(p.state, p.interrupted), p.existing ? ' existing codebase' : ''),
+      fmtTime(p.createdAt),
+      p.project ? h('a', { href: `#/p/${enc(p.project.projectId)}`, text: 'Open project →' }) : '—',
+    ],
+  })));
+}
+
+async function renderPlans() {
+  setCrumbs([{ text: 'Overview', href: '#/' }, { text: 'Plans' }]);
+  const ws = await getWorkspace();
+  if (!ws.enabled) return h('div', { class: 'notice info', text: ws.reason });
+  return h('div', {},
+    h('div', { class: 'controls' }, h('h1', { text: 'Ideas and plans' }), h('span', { class: 'spacer' }), h('a', { class: 'btn primary', href: '#/new', text: 'New project from an idea' })),
+    await plansTable());
+}
+
+const PLATFORM_LABELS = { website: 'Website', saas: 'SaaS', android: 'Android', ios: 'iOS', desktop: 'Desktop', api: 'API' };
+
+async function renderNewIdea() {
+  setCrumbs([{ text: 'Overview', href: '#/' }, { text: 'New project' }]);
+  const ws = await getWorkspace();
+  if (!ws.enabled) return h('div', { class: 'notice info', text: ws.reason });
+  const field = (label, input, hint) => h('label', { class: 'field' }, h('span', { class: 'field-label', text: label }), input, hint ? h('span', { class: 'small muted', text: hint }) : null);
+  const text = (name, placeholder) => h('input', { type: 'text', name, placeholder: placeholder ?? '', maxlength: 2000 });
+  const area = (name, rows, placeholder, max) => h('textarea', { name, rows, placeholder: placeholder ?? '', maxlength: max ?? 5000 });
+  const inputs = {
+    name: h('input', { type: 'text', name: 'name', required: true, maxlength: 80, placeholder: 'e.g. Tool Share' }),
+    idea: area('idea', 5, 'What problem does it solve, for whom, and how?', 10000),
+    targetUsers: text('targetUsers', 'Who will use it?'),
+    market: text('market', 'Where and how big, if known'),
+    businessModel: text('businessModel', 'Free, subscription, ads, one-off...'),
+    constraints: area('constraints', 2, 'Must-haves, must-nots, regulations...'),
+    budget: text('budget', 'e.g. hosting under 20 USD/month'),
+    preferredTech: text('preferredTech', 'Leave empty to let the planner recommend'),
+    research: area('research', 5, 'Paste notes, interview findings or document excerpts', 100000),
+    referenceUrls: area('referenceUrls', 2, 'One URL per line (recorded, not fetched unless live research is on)', 20000),
+    existingCodebasePath: text('existingCodebasePath', 'C:\\code\\my-app'),
+  };
+  const platforms = Object.entries(PLATFORM_LABELS).map(([value, label]) => {
+    const box = h('input', { type: 'checkbox', value });
+    return { value, box, el: h('label', { class: 'check' }, box, ` ${label}`) };
+  });
+  const status = h('div');
+  const p = ws.planner;
+  const submit = h('button', { class: 'btn primary', type: 'submit', text: 'Prepare proposal…' });
+  const form = h('form', { class: 'card idea-form', novalidate: true },
+    h('h2', { text: 'The idea (required)' }),
+    field('Product name', inputs.name),
+    field('Idea and problem statement', inputs.idea, 'At least 20 characters. Everything below is optional: the planner proposes defaults and labels them as assumptions.'),
+    h('h2', { text: 'Optional details' }),
+    field('Target users', inputs.targetUsers),
+    field('Market', inputs.market),
+    field('Business model and monetization', inputs.businessModel),
+    h('fieldset', { class: 'platforms' }, h('legend', { text: 'Preferred platforms' }), platforms.map((x) => x.el)),
+    field('Known constraints', inputs.constraints),
+    field('Budget limits', inputs.budget),
+    field('Preferred technologies', inputs.preferredTech),
+    field('Research and notes', inputs.research),
+    field('Reference URLs', inputs.referenceUrls),
+    ws.existingProjects ? field('Existing codebase (optional)', inputs.existingCodebasePath, `Absolute path of a git repository under: ${ws.existingProjectRoots.join(', ')}. Leave empty for a new project.`) : null,
+    status,
+    h('div', { class: 'controls' }, submit),
+  );
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const idea = {
+      name: inputs.name.value.trim(),
+      idea: inputs.idea.value.trim(),
+      targetUsers: inputs.targetUsers.value,
+      market: inputs.market.value,
+      businessModel: inputs.businessModel.value,
+      constraints: inputs.constraints.value,
+      budget: inputs.budget.value,
+      preferredTech: inputs.preferredTech.value,
+      research: inputs.research.value,
+      referenceUrls: inputs.referenceUrls.value.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
+      platforms: platforms.filter((x) => x.box.checked).map((x) => x.value),
+      existingCodebasePath: inputs.existingCodebasePath.value.trim(),
+    };
+    if (idea.name.length < 2) return status.replaceChildren(h('div', { class: 'notice err', text: 'Enter a product name.' }));
+    if (idea.idea.length < 20) return status.replaceChildren(h('div', { class: 'notice err', text: 'Describe the idea in at least 20 characters.' }));
+    status.replaceChildren();
+    confirmDialog({
+      title: 'Prepare a proposal?',
+      confirmText: 'Prepare proposal',
+      body: h('div', {},
+        h('p', { text: `The planner (${p.name}${p.model ? `, ${p.model}` : ''}) prepares a product proposal for you to approve or reject. Nothing is created yet.` }),
+        kv([
+          ['Live research', p.webResearch ? 'on (web search and fetch)' : 'off: only your input is used'],
+          ['Per planner call', p.maxBudgetUsdPerCall === null ? 'no cost cap configured' : `up to $${p.maxBudgetUsdPerCall} (Claude Code estimate)`],
+          ['Per idea', `${p.maxCostUsdPerPlan === null ? 'no total cost cap' : `up to $${p.maxCostUsdPerPlan}`}; at most ${p.maxCallsPerPlan} planner calls`],
+        ]),
+        h('p', { class: 'small muted', text: 'Costs are Claude Code\'s own estimates, not a bill or a hard guarantee.' })),
+      action: async (requestId) => {
+        const res = await api('/api/plans', { method: 'POST', body: { requestId, confirm: true, idea } });
+        closeModal();
+        location.hash = `#/plan/${enc(res.planId)}`;
+        return res;
+      },
+    });
+  });
+  return h('div', {},
+    h('h1', { text: 'New project from an idea' }),
+    h('div', { class: 'notice info small', text: `${ws.research} You approve the idea once; the factory then writes the specification, validates the backlog and creates the project in ${ws.projectsDir}.` }),
+    form);
+}
+
+const PLAN_STEPS = [
+  ['idea', 'Idea'], ['proposal', 'Proposal'], ['approval', 'Approval'], ['plan', 'Plan'], ['validation', 'Validation'], ['project', 'Project'],
+];
+
+function stepState(plan) {
+  const order = { proposing: 1, 'needs-input': 1, proposed: 2, finalizing: 3, invalid: 4, 'needs-attention': plan.proposal && plan.decision ? 3 : 1, initializing: 5, ready: 6, rejected: 2, failed: { propose: 1, finalize: 3, initialize: 5 }[plan.failure?.step] ?? 1 };
+  return order[plan.state] ?? 0;
+}
+
+function stepsView(plan) {
+  const current = stepState(plan);
+  const bad = ['failed', 'invalid', 'needs-attention', 'rejected'].includes(plan.state) || plan.interrupted;
+  return h('ol', { class: 'steps' }, PLAN_STEPS.map(([, label], i) =>
+    h('li', { class: i < current ? 'done' : i === current ? (bad ? 'bad' : plan.state === 'ready' ? 'done' : 'now') : '' }, label)));
+}
+
+function planActions(plan) {
+  const id = plan.planId;
+  const post = (kind, body) => (requestId) => api(`/api/plans/${enc(id)}/${kind}`, { method: 'POST', body: { requestId, ...body } });
+  const buttons = [];
+  if (plan.actions.includes('approve')) buttons.push(h('button', { class: 'btn primary', type: 'button', text: 'Approve idea…', onclick: () => confirmDialog({
+    title: 'Approve this idea?',
+    confirmText: 'Approve',
+    body: h('div', {},
+      h('p', { text: 'The planner then writes the full specification and backlog, the factory validates them and creates the project, without asking again.' }),
+      h('p', { class: 'small', text: 'Safety gates stay in place: every task result still waits for review (unless auto-accept is configured), and nothing is deployed, published or bought.' })),
+    action: post('approve', { confirm: true }),
+  }) }));
+  if (plan.actions.includes('answer')) {
+    const answer = h('textarea', { rows: 3, maxlength: 5000 });
+    buttons.push(h('button', { class: 'btn primary', type: 'button', text: 'Answer question…', onclick: () => confirmDialog({
+      title: 'Answer the planner',
+      confirmText: 'Send answer',
+      body: h('div', {}, h('p', { text: plan.proposal?.blockingQuestion ?? '' }), h('label', {}, 'Your answer', answer)),
+      validate: () => (answer.value.trim() ? null : 'An answer is required.'),
+      action: (requestId) => post('answer', { answer: answer.value.trim() })(requestId),
+    }) }));
+  }
+  if (plan.actions.includes('retry')) buttons.push(h('button', { class: 'btn', type: 'button', text: 'Retry…', onclick: () => confirmDialog({
+    title: 'Retry the failed step?',
+    confirmText: 'Retry',
+    body: h('p', { text: 'Only the step that failed runs again; completed steps are kept. A retry may call the planner again (within the configured limits).' }),
+    action: post('retry', { confirm: true }),
+  }) }));
+  if (plan.actions.includes('reject')) {
+    const reason = h('textarea', { rows: 3, maxlength: 2000 });
+    buttons.push(h('button', { class: 'btn danger', type: 'button', text: 'Reject idea…', onclick: () => confirmDialog({
+      title: 'Reject this idea?',
+      confirmText: 'Reject',
+      danger: true,
+      body: h('div', {}, h('p', { text: 'No project is created. The idea, proposal and records are kept.' }), h('label', {}, 'Reason (required)', reason)),
+      validate: () => (reason.value.trim() ? null : 'A reason is required.'),
+      action: (requestId) => post('reject', { confirm: true, reason: reason.value.trim() })(requestId),
+    }) }));
+  }
+  return buttons;
+}
+
+function statementsView(statements) {
+  if (!statements || statements.length === 0) return h('p', { class: 'muted', text: 'None recorded.' });
+  return h('ul', { class: 'plain' }, statements.map((s) => h('li', {}, basisBadge(s.basis), ` ${s.statement}`, s.sourceIds.length ? h('span', { class: 'small muted', text: ` (${s.sourceIds.join(', ')})` }) : null)));
+}
+
+function sourcesView(sources) {
+  if (!sources || sources.length === 0) return h('p', { class: 'muted', text: 'No sources. No live research was performed.' });
+  return h('ul', { class: 'plain' }, sources.map((s) => h('li', {}, h('strong', { text: `${s.id} ` }), s.title, ' ', badge(s.kind, s.kind === 'web' ? 'ok' : 'info'),
+    s.url ? h('div', { class: 'small mono', text: s.url }) : null,
+    h('div', { class: 'small muted', text: s.retrievedAt ? `retrieved ${s.retrievedAt}` : 'retrieval date not recorded' }),
+    s.notes ? h('div', { class: 'small', text: s.notes }) : null)));
+}
+
+function proposalView(plan) {
+  const p = plan.proposal;
+  if (!p) return h('p', { class: 'muted', text: plan.state === 'proposing' ? 'The planner is preparing the proposal…' : 'No proposal yet.' });
+  return h('div', {},
+    plan.proposalWarnings.length ? h('div', { class: 'notice warn' }, h('strong', { text: 'Warnings: ' }), h('ul', { class: 'plain' }, plan.proposalWarnings.map((w) => h('li', { text: w })))) : null,
+    h('div', { class: 'card' },
+      h('h2', { text: p.productName }),
+      h('p', { text: p.summary }),
+      kv([
+        ['Problem', p.problem],
+        ['Value', p.valueProposition],
+        ['Users', p.targetUsers.join('; ')],
+        ['Project type', `${p.projectType} (${p.platforms.join(', ')})`],
+        ['Estimated effort', `${p.effort.estimatedTasks} tasks, ${p.effort.complexity}${p.effort.notes ? ` - ${p.effort.notes}` : ''}`],
+      ])),
+    h('div', { class: 'grid section' },
+      h('div', { class: 'card' }, h('h3', { text: 'MVP scope' }), h('ul', { class: 'plain' }, p.mvpScope.map((s) => h('li', { text: s })))),
+      h('div', { class: 'card' }, h('h3', { text: 'Out of scope' }), p.outOfScope.length ? h('ul', { class: 'plain' }, p.outOfScope.map((s) => h('li', { text: s }))) : h('p', { class: 'muted', text: 'None listed.' }))),
+    h('h3', { text: 'Recurring costs' }),
+    p.recurringCosts.length ? table(['Item', 'Estimate', 'Basis', 'Notes'], p.recurringCosts.map((c) => ({ cells: [c.item, c.estimate, basisBadge(c.basis), c.notes || '—'] }))) : h('p', { class: 'muted', text: 'None identified.' }),
+    h('h3', { text: 'Major risks' }),
+    p.risks.length ? table(['Risk', 'Severity', 'Mitigation'], p.risks.map((r) => ({ cells: [r.risk, badge(r.severity, r.severity === 'high' ? 'err' : r.severity === 'medium' ? 'warn' : ''), r.mitigation] }))) : h('p', { class: 'muted', text: 'None listed.' }),
+    h('h3', { text: 'Facts, findings, assumptions and recommendations' }),
+    statementsView(p.statements),
+    p.openQuestions.length ? [h('h3', { text: 'Open questions (defaults assumed)' }), h('ul', { class: 'plain' }, p.openQuestions.map((q) => h('li', { text: q })))] : null,
+  );
+}
+
+async function documentsView(plan) {
+  if (plan.documents.length === 0) return h('p', { class: 'muted', text: 'Documents are generated after the idea is approved.' });
+  const name = plan.documents.includes(ui.planDoc) ? ui.planDoc : plan.documents[0];
+  const doc = await api(`/api/plans/${enc(plan.planId)}/documents/${enc(name)}`);
+  return h('div', {},
+    h('div', { class: 'chips' }, plan.documents.map((d) => h('button', { type: 'button', class: `chip ${d === name ? 'active' : ''}`, text: d, onclick: () => { ui.planDoc = d; render(); } }))),
+    h('pre', { class: 'doc', text: doc.content }));
+}
+
+function tasksGraphView(plan) {
+  if (plan.tasks.length === 0) return h('p', { class: 'muted', text: 'The backlog is generated after the idea is approved.' });
+  const byId = new Map(plan.tasks.map((t) => [t.id, t]));
+  const riskClass = (r) => (r === 'high' ? 'err' : r === 'medium' ? 'warn' : 'ok');
+  return h('div', {},
+    h('p', { class: 'small muted', text: 'Tasks in the same column only depend on earlier columns; the factory runs them one at a time in this order.' }),
+    h('div', { class: 'waves' }, plan.waves.map((wave, i) => h('div', { class: 'wave' },
+      h('div', { class: 'label', text: `Step ${i + 1}` }),
+      wave.map((id) => {
+        const t = byId.get(id);
+        return h('div', { class: 'task-node' }, h('div', {}, h('strong', { class: 'mono', text: id }), ' ', badge(t.risk, riskClass(t.risk))), h('div', { class: 'small', text: t.title }),
+          t.dependencies.length ? h('div', { class: 'small muted', text: `after ${t.dependencies.join(', ')}` }) : null);
+      })))),
+    h('h3', { text: 'Backlog' }),
+    plan.tasks.map((t) => persistentDetails(`plan-${plan.planId}-${t.id}`,
+      h('span', {}, h('strong', { class: 'mono', text: t.id }), ` ${t.title} `, badge(t.category), ' ', badge(t.risk, riskClass(t.risk)), t.riskFlags.length ? h('span', { class: 'small muted', text: ` ${t.riskFlags.join(', ')}` }) : null),
+      kv([
+        ['Depends on', t.dependencies.join(', ') || 'nothing'],
+        ['Covers', t.covers.join(', ') || 'foundation'],
+        ['Checks', t.checks.join(', ')],
+      ]),
+      h('h3', { text: 'Acceptance criteria' }), h('ul', { class: 'plain' }, t.acceptanceCriteria.map((c) => h('li', { text: c }))),
+      h('h3', { text: 'Deliverables' }), h('ul', { class: 'plain' }, t.deliverables.map((c) => h('li', { text: c }))),
+      h('h3', { text: 'Completion evidence' }), h('ul', { class: 'plain' }, t.evidence.map((c) => h('li', { text: c }))))),
+  );
+}
+
+function validationView(plan) {
+  const v = plan.validation;
+  if (!v) return h('p', { class: 'muted', text: 'The plan has not been validated yet.' });
+  const e = v.estimate;
+  return h('div', {},
+    h('div', { class: `notice ${v.valid ? 'ok' : 'err'}`, text: v.valid ? 'The plan passed every check.' : `The plan failed ${v.errors.length} check(s).` }),
+    v.errors.length ? [h('h3', { text: 'Errors' }), h('ul', { class: 'plain' }, v.errors.map((x) => h('li', { text: x })))] : null,
+    v.warnings.length ? [h('h3', { text: 'Warnings and unresolved items' }), h('ul', { class: 'plain' }, v.warnings.map((x) => h('li', { text: x })))] : null,
+    h('h3', { text: 'Execution estimate (upper bounds)' }),
+    kv([
+      ['Tasks', String(e.tasks)],
+      ['Runs needed', `${e.runs} (task limit per run)`],
+      ['Agent calls', `up to ${e.maxAgentCalls}`],
+      ['Agent cost', e.maxCostUsd === null ? 'not bounded (no per-call cap configured)' : `up to $${e.maxCostUsd} (Claude Code estimates)`],
+      ['Agent time', `up to ${fmtMs(e.maxDurationMs)}`],
+    ]),
+    h('ul', { class: 'plain small muted' }, e.notes.map((n) => h('li', { text: n }))));
+}
+
+async function renderPlan(planId, tab) {
+  const plan = await api(`/api/plans/${enc(planId)}`);
+  const name = plan.proposal?.productName ?? plan.idea.name;
+  setCrumbs([{ text: 'Overview', href: '#/' }, { text: 'Plans', href: '#/plans' }, { text: name }]);
+  const tabs = [['proposal', 'Proposal'], ['documents', 'Documents'], ['tasks', 'Task graph'], ['validation', 'Validation'], ['sources', 'Sources and assumptions'], ['activity', 'Activity']];
+  let content;
+  if (tab === 'documents') content = await documentsView(plan);
+  else if (tab === 'tasks') content = tasksGraphView(plan);
+  else if (tab === 'validation') content = validationView(plan);
+  else if (tab === 'sources') content = h('div', {},
+    h('h3', { text: 'Sources' }), sourcesView((plan.proposal?.sources ?? [])),
+    h('h3', { text: 'Statements in the proposal' }), statementsView(plan.proposal?.statements),
+    h('p', { class: 'small muted', text: 'The final plan\'s sources, findings and open questions are in RESEARCH.md (Documents tab).' }));
+  else if (tab === 'activity') content = h('div', {},
+    kv([
+      ['Planner calls', `${plan.cost.calls} of at most ${plan.cost.maxCalls}`],
+      ['Planner cost', `$${plan.cost.usd.toFixed(4)}${plan.cost.capUsd !== null ? ` of $${plan.cost.capUsd}` : ''} (${plan.cost.label})${plan.cost.unknown ? '; INCOMPLETE: a call did not report its cost' : ''}`],
+      ['Attempts', `proposal ${plan.attempts.propose}, plan ${plan.attempts.finalize}, project ${plan.attempts.initialize}`],
+    ]),
+    h('div', { class: 'card section' }, h('ul', { class: 'timeline' }, plan.events.slice().reverse().map((e) => h('li', {}, h('span', { class: 'small muted', text: fmtTime(e.at) }), h('span', {}, badge(e.type)), h('span', { text: e.message }))))));
+  else content = proposalView(plan);
+
+  const working = (plan.running || ['proposing', 'finalizing', 'initializing'].includes(plan.state)) && !plan.interrupted;
+  return h('div', {},
+    h('div', { class: 'controls' }, h('h1', { text: name }), planBadge(plan.state, plan.interrupted), h('span', { class: 'spacer' }), planActions(plan),
+      plan.project ? h('a', { class: 'btn primary', href: `#/p/${enc(plan.project.projectId)}`, text: 'Open project and start a run →' }) : null),
+    stepsView(plan),
+    working ? h('div', { class: 'notice info', role: 'status', text: { proposing: 'The planner is preparing the proposal. This page updates by itself.', finalizing: 'The planner is writing the specification and backlog, then the factory validates it.', initializing: 'Creating and registering the project…' }[plan.state] ?? 'Working…' }) : null,
+    plan.interrupted ? h('div', { class: 'notice err', text: 'This step was interrupted (the dashboard stopped while it ran). Retry it; completed steps are kept.' }) : null,
+    plan.state === 'proposed' ? h('div', { class: 'notice warn', text: 'Review the proposal, then approve or reject the idea. This is the only approval needed to create the project.' }) : null,
+    plan.state === 'needs-input' ? h('div', { class: 'notice warn' }, h('strong', { text: 'The planner needs one answer: ' }), plan.proposal?.blockingQuestion ?? '') : null,
+    plan.attention ? h('div', { class: 'notice err' }, h('strong', { text: 'Needs attention: ' }), plan.attention.message) : null,
+    plan.failure ? h('div', { class: 'notice err' }, h('strong', { text: `The ${plan.failure.step} step failed: ` }), plan.failure.message) : null,
+    plan.state === 'invalid' ? h('div', { class: 'notice err', text: 'The generated plan did not pass validation. See the Validation tab; retry or reject.' }) : null,
+    plan.state === 'rejected' ? h('div', { class: 'notice', text: `Rejected${plan.decision?.reason ? `: ${plan.decision.reason}` : ''}.` }) : null,
+    plan.state === 'ready' && plan.project ? h('div', { class: 'notice ok' }, 'The project is ready at ', h('span', { class: 'mono', text: plan.project.root }), '. Open it to review the backlog and start an autonomous run with the usual controls.') : null,
+    plan.existing ? h('div', { class: 'small muted' }, `Existing codebase ${plan.existing.path}: ${plan.existing.isGitRepo ? `branch ${plan.existing.branch ?? '(detached)'}, ${plan.existing.uncommittedChanges} uncommitted change(s)` : 'not a git repository'}${plan.existing.problems.length ? `; ${plan.existing.problems.join('; ')}` : ''}.`) : null,
+    h('nav', { class: 'tabs' }, tabs.map(([key, label]) => h('a', { href: `#/plan/${enc(planId)}/${key}`, class: key === tab ? 'active' : '', text: label }))),
+    content,
+  );
+}
+
 // ----------------------------------------------------------------- polling
 
 let lastVersions = null;
@@ -717,7 +1053,11 @@ async function poll() {
     live.className = 'live ok';
     live.textContent = `updated ${new Date().toLocaleTimeString()}`;
     const r = route();
-    const relevant = status.projects.filter((p) => r.view === 'overview' || p.id === r.pid).map((p) => `${p.id}:${p.version}`).join(',');
+    const plansShown = r.view === 'overview' || r.view === 'plans' || r.view === 'plan';
+    const relevant = [
+      ...status.projects.filter((p) => r.view === 'overview' || p.id === r.pid).map((p) => `${p.id}:${p.version}`),
+      ...(status.plans ?? []).filter((p) => plansShown && (r.view !== 'plan' || p.planId === r.plan)).map((p) => `${p.planId}:${p.version}`),
+    ].join(',');
     if (lastVersions !== null && relevant !== lastVersions && !modalOpen) render();
     lastVersions = relevant;
   } catch (err) {

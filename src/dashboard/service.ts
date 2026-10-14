@@ -11,6 +11,7 @@ import { TASK_ID, RUN_ID, type Task } from '../tasks/task.js';
 import { explainTasks } from '../tasks/taskSelector.js';
 import os from 'node:os';
 import { latestLaunchLog, type LaunchRequest, type LaunchResult, type RunLauncher } from './launcher.js';
+import type { PlanningService } from '../planning/planningService.js';
 import type { DashboardProject } from './projects.js';
 import {
   budgetView,
@@ -50,6 +51,8 @@ export interface DashboardServiceOptions {
   now?: () => Date;
   /** Test seam for the agent availability check (default: search PATH without running anything). */
   agentAvailable?: (executable: string) => Promise<boolean>;
+  /** Idea-to-project planning (dashboard started with --workspace). */
+  planning?: PlanningService;
 }
 
 /**
@@ -65,14 +68,31 @@ export class DashboardService {
   /** Projects with a start/resume request being processed (duplicate-click guard). */
   private readonly launching = new Set<string>();
   private readonly agentCache = new Map<string, boolean>();
+  private readonly list: DashboardProject[];
 
   constructor(
-    readonly projects: readonly DashboardProject[],
+    projects: readonly DashboardProject[],
     private readonly options: DashboardServiceOptions,
   ) {
+    this.list = [...projects];
     this.byId = new Map(projects.map((p) => [p.id, p] as const));
     this.now = options.now ?? (() => new Date());
     this.agentAvailable = options.agentAvailable ?? findOnPath;
+    this.planning = options.planning;
+  }
+
+  /** Idea-to-project planning, when the dashboard was started with a workspace. */
+  readonly planning: PlanningService | undefined;
+
+  get projects(): readonly DashboardProject[] {
+    return this.list;
+  }
+
+  /** Add a project created while the dashboard runs (by planning). Adding the same project twice is a no-op. */
+  addProject(project: DashboardProject): void {
+    if (this.byId.has(project.id)) return;
+    this.list.push(project);
+    this.byId.set(project.id, project);
   }
 
   project(id: string): DashboardProject {
@@ -165,7 +185,16 @@ export class DashboardService {
         return { id: p.id, version: createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16) };
       }),
     );
-    return { serverTime: this.now().toISOString(), projects };
+    const plans =
+      this.planning === undefined
+        ? []
+        : await Promise.all(
+            (await this.planning.store.list()).map(async (planId) => ({
+              planId,
+              version: await stamp(path.join(this.planning!.store.dir(planId), 'plan-record.json')),
+            })),
+          );
+    return { serverTime: this.now().toISOString(), projects, plans };
   }
 
   async projectDetail(id: string) {

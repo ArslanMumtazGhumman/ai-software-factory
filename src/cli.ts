@@ -10,10 +10,8 @@ import type { AutoRunRecord, TaskCounts } from './persistence/autoRunStore.js';
 import { FileLock } from './persistence/fileLock.js';
 import { ProjectRepository } from './persistence/projectRepository.js';
 import { redactSecrets } from './security/redact.js';
-import { CliRunLauncher } from './dashboard/launcher.js';
-import { loadProjects } from './dashboard/projects.js';
+import { createDashboard } from './dashboard/bootstrap.js';
 import { DEFAULT_PORT, startDashboardServer, type DashboardServer } from './dashboard/server.js';
-import { DashboardService } from './dashboard/service.js';
 
 const USAGE = `AI Software Factory
 
@@ -47,8 +45,10 @@ Autonomous runs (requires "autonomy.enabled": true):
   auto failures [autoRunId]        Failure details: agent result, checks, repairs, findings
 
 Dashboard:
-  dashboard [--port N]             Local web dashboard on http://127.0.0.1:N/ (default ${DEFAULT_PORT}).
-                                   Repeat --config to show several projects. Stop it with Ctrl+C.
+  dashboard [--port N] [--workspace <file>]
+                                   Local web dashboard on http://127.0.0.1:N/ (default ${DEFAULT_PORT}).
+                                   Repeat --config to show several projects. --workspace enables
+                                   creating projects from ideas. Stop it with Ctrl+C.
 
 Other:
   record <taskId> <success|failure> <summary...>
@@ -59,6 +59,7 @@ Other:
 Options:
   --config <path>                  Config file (default: factory.config.json)
   --port <N>                       Dashboard port, 1024-65535 (dashboard only)
+  --workspace <path>               factory.workspace.json for idea-to-project planning (dashboard only)
 `;
 
 interface ParsedArgs {
@@ -68,6 +69,7 @@ interface ParsedArgs {
   /** Every --config given, in order (the dashboard can show several projects). */
   configPaths: string[];
   port?: number;
+  workspaceFile?: string;
   noDiff: boolean;
   maxTasks?: number;
   retryFailed: boolean;
@@ -78,6 +80,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   let configPath = 'factory.config.json';
   const configPaths: string[] = [];
   let port: number | undefined;
+  let workspaceFile: string | undefined;
   let noDiff = false;
   let maxTasks: number | undefined;
   let retryFailed = false;
@@ -88,6 +91,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       if (value === undefined) throw new UsageError('--config requires a path');
       configPath = value;
       configPaths.push(value);
+    } else if (arg === '--workspace') {
+      const value = argv[++i];
+      if (value === undefined) throw new UsageError('--workspace requires a path');
+      workspaceFile = value;
     } else if (arg === '--port') {
       const value = argv[++i];
       if (value === undefined || !/^[0-9]{4,5}$/.test(value) || Number(value) < 1024 || Number(value) > 65535) {
@@ -119,6 +126,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     retryFailed,
     ...(maxTasks !== undefined ? { maxTasks } : {}),
     ...(port !== undefined ? { port } : {}),
+    ...(workspaceFile !== undefined ? { workspaceFile } : {}),
   };
 }
 
@@ -195,7 +203,7 @@ async function main(argv: readonly string[]): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
-  if (args.port !== undefined && args.command !== 'dashboard') throw new UsageError('--port applies to "dashboard" only');
+  if ((args.port !== undefined || args.workspaceFile !== undefined) && args.command !== 'dashboard') throw new UsageError('--port and --workspace apply to "dashboard" only');
   if (args.command === 'dashboard') return runDashboard(args);
 
   const config = await loadFactoryConfig(args.configPath);
@@ -376,10 +384,15 @@ async function main(argv: readonly string[]): Promise<number> {
 }
 
 async function runDashboard(args: ParsedArgs): Promise<number> {
-  if (args.positionals.length > 0) throw new UsageError('Usage: dashboard [--config <path>]... [--port N]');
+  if (args.positionals.length > 0) throw new UsageError('Usage: dashboard [--config <path>]... [--workspace <path>] [--port N]');
   const log = (line: string) => out(`[dashboard] ${redactSecrets(line)}`);
-  const projects = await loadProjects(args.configPaths.length > 0 ? args.configPaths : [args.configPath]);
-  const service = new DashboardService(projects, { launcher: new CliRunLauncher() });
+  const { service, planning, warnings } = await createDashboard({
+    configPaths: args.configPaths,
+    ...(args.workspaceFile !== undefined ? { workspaceFile: args.workspaceFile } : {}),
+    log,
+  });
+  for (const w of warnings) log(w);
+  const projects = service.projects;
   let dashboard: DashboardServer;
   try {
     dashboard = await startDashboardServer({ service, ...(args.port !== undefined ? { port: args.port } : {}), log });
@@ -390,7 +403,8 @@ async function runDashboard(args: ParsedArgs): Promise<number> {
     throw err;
   }
   out(`AI Software Factory dashboard: ${dashboard.url}`);
-  out(`Listening on 127.0.0.1 only. Projects: ${projects.map((p) => p.config.projectRoot).join(', ')}`);
+  out(`Listening on 127.0.0.1 only. Projects: ${projects.map((p) => p.config.projectRoot).join(', ') || '(none yet)'}`);
+  if (planning !== undefined) out(`Planning: on (planner ${planning.plannerName}; new projects go to ${planning.workspace.projectsDir}).`);
   out('Open the address above in your browser. Press Ctrl+C to stop the dashboard (runs it started keep running).');
   await new Promise<void>((resolve) => {
     const stop = () => {

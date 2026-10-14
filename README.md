@@ -3,7 +3,7 @@
 A local, reusable orchestrator that will eventually take an approved product idea
 through planning, implementation, testing and deployment.
 
-**Current state: milestone 4, local web dashboard.** The factory can:
+**Current state: milestone 5, idea-to-project planning.** The factory can:
 
 - store a project specification and its tasks as JSON,
 - validate the task dependency graph (unknown ids, duplicates, self-dependencies, cycles),
@@ -21,7 +21,11 @@ through planning, implementation, testing and deployment.
 - run named, allowlisted commands from project configuration,
 - show projects, tasks, runs, evidence and activity in a **local web dashboard** (127.0.0.1
   only), and start, pause, resume and stop runs and accept or reject results from it, using
-  the same operations and safety checks as the CLI (milestone 4).
+  the same operations and safety checks as the CLI (milestone 4),
+- **turn an approved product idea into a project**: a planner prepares a proposal, you approve
+  the idea once, and the factory writes the specification documents, validates the backlog,
+  creates (or safely prepares) the project and registers it, ready for an autonomous run
+  (milestone 5).
 
 It does **not** merge into your branches, push, publish or deploy anything, coordinate multiple
 agents, or offer any remote access.
@@ -84,7 +88,7 @@ Run the CLI with `node dist\src\cli.js <command> --config <path>`. The default c
 | `auto failures [autoRunId]` | Failure details: agent result, failing check output, repairs, findings, worktree | No |
 | `record <taskId> <success\|failure> <summary...>` | Records a manual attempt (not for supervised runs) | Yes |
 | `run-check <name>` | Runs a command from the config's `commands` section in the project root | No |
-| `dashboard [--port N]` | Local web dashboard for one or more projects (repeat `--config`); see "Dashboard" | Only through its controls |
+| `dashboard [--port N] [--workspace F]` | Local web dashboard for one or more projects (repeat `--config`); `--workspace` adds idea-to-project planning. See "Dashboard" and "From idea to project" | Only through its controls |
 | `help` | Usage | No |
 
 Exit codes: `0` success, `1` error or failed execution (printed as `Error [CODE]: ...`), `2` usage error.
@@ -511,6 +515,233 @@ The dashboard can launch an AI coding agent that changes source code, so it is l
 - Supervised single-task `execute` is not offered in the dashboard; use the CLI.
 - The cost shown is Claude Code's own estimate (`total_cost_usd`), not an Anthropic bill.
 
+## From idea to project
+
+You describe a product idea in the dashboard. A planner turns it into a short proposal, and you
+approve or reject the **idea**; that is the only approval. After approval the factory writes the
+full specification and backlog, validates them, creates the project, imports the backlog into
+the task engine and shows the project in the dashboard, ready to start an autonomous run.
+
+### 1. Create a workspace file
+
+The workspace says where new projects go and how planning may spend money. Save it as, for
+example, `C:\factory\factory.workspace.json`:
+
+```json
+{
+  "version": 1,
+  "projectsDir": "projects",
+  "existingProjectRoots": ["C:\\code"],
+  "planner": {
+    "type": "claude-code",
+    "maxBudgetUsdPerCall": 1,
+    "maxCostUsdPerPlan": 4,
+    "maxAttemptsPerStep": 2,
+    "maxCallsPerPlan": 8,
+    "webResearch": false
+  },
+  "limits": { "maxTasks": 40 },
+  "allowedExecutables": ["node"],
+  "projectDefaults": {
+    "maxTasksPerRun": 10,
+    "maxRepairAttempts": 1,
+    "agent": { "maxBudgetUsd": 1 },
+    "autonomy": { "maxCostUsd": 3, "maxRunDurationMs": 7200000, "maxTaskDurationMs": 2700000 },
+    "autoAcceptLowRisk": false
+  }
+}
+```
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `projectsDir` | `projects` | New projects are created here, as `<projectsDir>\<name>` (relative to the workspace file; must stay inside its folder) |
+| `stateDir` | `.factory-workspace` | Planning records and the registry of created projects |
+| `existingProjectRoots` | `[]` | Absolute folders under which existing codebases may be extended. Empty: only new projects |
+| `planner.type` | `claude-code` | `claude-code` (real planning) or `fixture` (replays saved `proposal.json`/`plan.json` from `planner.fixtureDir`; no AI, for demos and tests) |
+| `planner.maxBudgetUsdPerCall` | none | Passed to Claude Code as `--max-budget-usd` for every planner call |
+| `planner.maxCostUsdPerPlan` | none | Budget for all planner calls of one idea (needs `maxBudgetUsdPerCall`) |
+| `planner.maxAttemptsPerStep` | 2 | Planner calls per step: the first try plus repairs of invalid output |
+| `planner.maxCallsPerPlan` | 8 | Hard cap on planner calls for one idea, including retries |
+| `planner.webResearch` | `false` | Lets the planner use WebSearch/WebFetch. Off: no live research and no extra research cost |
+| `planner.timeoutMs` | 900000 | Time limit per planner call |
+| `planner.model`, `planner.passEnv` | none | As for the coding agent |
+| `limits.maxTasks` | 40 | Largest backlog the factory accepts |
+| `allowedExecutables` | `["node"]` | Executables generated validation commands may use |
+| `projectDefaults.*` | see above | Copied into each new project's `factory.config.json`: task limit per run, retries, repairs, agent budget, run budget and time limits |
+| `projectDefaults.autoAcceptLowRisk` | `false` | Auto-accept results of low-risk tasks without sensitive flags. Off: every result waits for review |
+
+### 2. Start the dashboard with the workspace (Windows CMD)
+
+```cmd
+cd C:\path\to\ai-software-factory
+npm run build
+node dist\src\cli.js dashboard --workspace C:\factory\factory.workspace.json
+```
+
+You can add `--config <file>` for existing factory projects, too. Projects created from ideas
+are remembered in the workspace and appear again whenever the dashboard is started with the
+same `--workspace`. Stop the dashboard with Ctrl+C.
+
+### 3. Create a project from the dashboard
+
+1. Open `http://127.0.0.1:4317/` and click **New project from an idea**.
+2. Enter a **product name** and the **idea and problem statement** (at least 20 characters).
+   Everything else is optional: target users, market, business model, preferred platforms
+   (website, SaaS, Android, iOS, desktop, API), constraints, budget limits, preferred
+   technologies, research notes (paste text), reference URLs and, if enabled, the path of an
+   existing codebase.
+3. Click **Prepare proposal…**, check the planner, research and cost limits shown, and confirm.
+   The plan page shows progress and updates by itself.
+4. Read the proposal: summary, MVP scope and what is out of scope, estimated effort, recurring
+   costs, major risks, open questions, and every statement labelled as **user-provided**,
+   **verified** (with a source), **assumption** or **recommendation**.
+   - If the planner needs one essential answer, the plan shows **Answer question…**.
+5. Click **Approve idea…** (or **Reject idea…** with a reason). After approval the planner writes
+   the full plan, the factory validates it and creates the project. Watch the steps
+   Plan → Validation → Project.
+6. Inspect the **Documents**, **Task graph**, **Validation** (errors, warnings, estimated
+   effort) and **Sources and assumptions** tabs.
+7. Click **Open project and start a run →**. The project page shows the backlog (T1 ready to
+   run) and the usual **Start run…** control with its limits and confirmation.
+
+If a step fails (planner unavailable, budget used up, invalid plan, git problem) or the
+dashboard was closed while a step ran, the plan shows the reason and **Retry…**, which runs only
+the failed step again. Completed steps are never repeated.
+
+### What is generated
+
+| File | Contents |
+| --- | --- |
+| `docs\PRODUCT.md` | Problem, target users, value proposition, MVP scope, out of scope, differentiation, business model, effort, recurring costs, risks, and statements grouped by basis |
+| `docs\REQUIREMENTS.md` | Functional requirements (FR-n) with acceptance criteria and implementing tasks, non-functional requirements (NFR-n), user stories |
+| `docs\ARCHITECTURE.md` | Recommended stack with rationale, trade-offs and alternatives per layer; frontend, backend, database, integrations (and whether their APIs are verified), authentication, authorization, deployment architecture, validation commands |
+| `docs\UX_PLAN.md` | Screens (SCR-n) with the tasks that build them, navigation, journeys, responsive and accessibility requirements |
+| `docs\DATA_MODEL.md` | Entities with fields, validation, relationships, access control, retention and implementing tasks |
+| `docs\TEST_PLAN.md` | Unit, integration, browser, security and end-to-end tests; how the factory verifies each task |
+| `docs\RELEASE_PLAN.md` | Hosting, environments, environment variables (names only, secret or not), domains, migrations, backups, monitoring, legal and publication steps, all for a person to perform |
+| `docs\RESEARCH.md` | Sources with kind, URL and retrieval date, user-supplied URLs (marked as not retrieved), findings, assumptions, unresolved questions, clarifications |
+| `docs\TASKS.json` | The backlog in exactly the task engine's `tasks.json` format |
+
+All documents are rendered from one structured plan, so they cannot disagree. Each task has an
+id, title, scope, dependencies, acceptance criteria, the checks that verify it, deliverables, a
+risk level with flags (authentication, payments, secrets, migration, deployment, ...) and the
+completion evidence required. The task engine's format has no fields for the extra details, so
+they are written into the task description, which is also what the coding agent sees.
+
+A **new project** is created as `<projectsDir>\<name>`:
+- the documents above and a `factory.config.json` (limits, agent permissions and budgets from
+  the workspace; validation commands from the plan, restricted as described below);
+- `README.md`, and a `.gitignore` that excludes `.factory\`, `node_modules\` and `.env` files;
+- the backlog imported into `.factory\project.json` and `.factory\tasks.json`;
+- a new git repository with **one commit** of those generated files (author "AI Software
+  Factory"). The factory needs a commit to build isolated worktrees on.
+
+An **existing codebase** is never changed: no commit, no branch, no edits to your files. The
+documents and config go into its `.factory\` folder (`.factory\docs\`,
+`.factory\factory.config.json`), which the factory already excludes from its clean-repository
+check. It must be a git repository with at least one commit. A codebase that already has
+factory state is refused. Start runs for it with that config file.
+
+### Validation before a project is created
+
+The plan is rejected (and sent back to the planner, up to `maxAttemptsPerStep` times) when:
+
+- **Structure:** a document is structurally incomplete (missing fields, bad ids, empty
+  acceptance criteria, no checks or evidence on a task).
+- **Duplicates and graph:** an id is duplicated, or the task graph has a cycle or an unknown
+  dependency (the task engine's own rules).
+- **Coverage:** an MVP requirement is not covered by any task, a data-model entity has no task
+  implementing it, or a screen has no task building it.
+- **References:** a task, screen or user story refers to something that does not exist, or an
+  integration's configuration key is missing from the release plan's environment variables.
+- **Conflicts:** something is both in and out of scope, a requested platform was dropped, or a
+  task flagged authentication, payments, secrets, migration, deployment, paid resources or legal
+  is labelled low risk.
+- **Commands:** a validation command uses a non-allowlisted executable or any form other than
+  `node --test [test files]` and `node --run <script>`, or tries to install, publish or deploy.
+- **Sources:** a source is claimed as web research while live research was off, a "verified"
+  statement cites no web or codebase source, or a statement cites an unknown source.
+- **Secrets and limits:** anything looks like a secret, or the backlog exceeds `limits.maxTasks`
+  or the configured run limits cannot work (for example a run budget smaller than one call).
+
+Warnings (not blocking): open questions, unverified integrations, paid services, and tasks that
+prepare deployment (a person always deploys). The **Validation** tab also shows an upper-bound
+estimate: runs needed, agent calls, agent cost (when a per-call cap is set) and agent time.
+
+If the planner finds the approved product infeasible (or the plan would change it
+fundamentally), planning stops in **needs attention** with the explanation. Nothing else is
+substituted. Retry after adjusting, or reject.
+
+### Research and honesty
+
+- Without `webResearch`, the planner sees only what you entered, the existing codebase if any
+  (read-only), and its own knowledge. Every external fact is labelled as an assumption.
+  Reference URLs are recorded as provided by you, not as retrieved.
+- With `webResearch`, the planner may use WebSearch and WebFetch, and must list each page as a
+  source with URL and retrieval date. The factory cannot independently confirm that a page said
+  what the planner reports; treat findings as the planner's reading of the source.
+- Market demand, competitor pricing, API access and legal compliance are never presented as
+  verified unless a web or codebase source is cited for them.
+
+### Cost and safety controls for planning
+
+- The planner runs Claude Code in print mode with no tools for a new project, read-only `Read`,
+  `Glob` and `Grep` confined to the codebase for an existing project, and `WebSearch`/`WebFetch`
+  only when enabled. It never has tools that edit files or run commands. It also gets the same
+  hardening flags as the coding agent (`--restricted`, `--safe-mode`, no MCP servers, no
+  session files).
+- The planner only returns JSON. The factory renders every file itself; nothing the planner
+  produces is executed during planning.
+- Before every planner call, the factory checks:
+  - the call cap (`maxCallsPerPlan`);
+  - when a plan budget is set, that the remaining budget still covers a full call at
+    `maxBudgetUsdPerCall`;
+  - that the cost of every earlier call is known. If usage was not reported (for example after
+    a timeout), planning stops instead of assuming there is money left.
+- Planner costs are Claude Code's own estimates (`total_cost_usd`), shown as estimates. They are
+  not a bill or a hard spending guarantee.
+- Agent permissions, limits and budgets of the new project come only from the workspace file.
+  The planner cannot change them or any factory security setting.
+- Nothing is installed, deployed, published or bought. Paid services and production credentials
+  are listed in the release plan for a person to set up.
+
+### Dependencies of generated projects
+
+The factory runs validation commands without a shell, so on Windows only real executables
+(`node`) can be used, not `npm`/`npx`, which are `.cmd` scripts. Generated projects therefore
+check with `node --test` and `node --run <script>`. The factory does not install packages. If a
+project needs dependencies, install them once in the project folder after reviewing the setup
+task:
+
+```cmd
+cd C:\factory\projects\tool-share
+npm install
+```
+
+The isolated worktrees live inside the project (`.factory\worktrees\...`), so Node.js finds those
+installed packages, and `node --run` finds their command-line tools, from the project root.
+
+### Try it without AI costs
+
+`examples\sample-idea\` contains a sample idea with a saved proposal and plan ("Tool Share", 11
+tasks). A workspace with `"planner": { "type": "fixture", "fixtureDir": "C:\\path\\to\\ai-software-factory\\examples\\sample-idea" }`
+replays them, so you can go through the whole workflow in the dashboard without any planner
+call. Paste the contents of `idea.json` into the form, or enter any idea; the fixture always
+returns the Tool Share plan.
+
+### Planning limitations
+
+- The quality of the specification depends on the planner model; validation checks consistency
+  and safety, not whether the product idea is good.
+- Research documents can only be pasted as text; there is no file upload.
+- The task engine runs the same validation commands after every task. Per-task checks are
+  recorded in the task description and must be a subset of those commands.
+- An existing codebase's documents live in its untracked `.factory\docs\`, which worktrees do
+  not contain. The coding agent sees each task's full description, but not those documents.
+- Planning steps run inside the dashboard process. If it stops mid-step, the step is shown as
+  interrupted and can be retried.
+- One planner process per step. There is no multi-agent planning.
+
 ## Recovery procedures
 
 | Situation | What you see | What to do |
@@ -683,6 +914,7 @@ Unknown setting names and out-of-range values are rejected rather than ignored.
   autoruns\<autoRunId>\autorun.json    autonomous run history
   autoruns\<autoRunId>\control.json    the last pause/stop request
   autoruns\dashboard-launches\         output of runs started from the dashboard
+  origin.json                          (planned projects) which plan created this project
   stale-locks\                         archived locks from crashed processes
   .gitignore                           written once; ignores the local state above
 ```

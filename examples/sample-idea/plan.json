@@ -1,0 +1,243 @@
+{
+  "product": {
+    "name": "Tool Share",
+    "problem": "Tool requests are scattered across a neighbourhood chat group, nobody knows who has which tool, and lent tools go missing.",
+    "targetUsers": ["Neighbourhood members who lend and borrow tools", "A volunteer organiser who invites members"],
+    "valueProposition": "Find a tool nearby in seconds and always know where lent tools are.",
+    "mvpScope": [
+      "Member sign-up and sign-in with an invitation code",
+      "List a tool with a description and availability",
+      "Browse and search the neighbourhood catalogue",
+      "Request a loan for dates",
+      "Lender approves or declines, and marks the tool returned",
+      "My loans: what I borrowed and lent"
+    ],
+    "differentiation": "Built for one closed community: invitation-only, no marketplace features, no payments, minimal personal data.",
+    "businessModel": "Free for members; hosting kept under 10 USD per month. A donation link may be added later.",
+    "outOfScope": ["Payments or deposits", "Email notifications", "Native mobile apps", "Multiple neighbourhoods"]
+  },
+  "requirements": {
+    "functional": [
+      { "id": "FR-1", "title": "Member accounts", "description": "A person with a valid invitation code signs up with name, email and password; members sign in and out.", "mvp": true, "acceptanceCriteria": ["Sign-up without a valid invitation code is refused", "A member can sign in and sign out", "Passwords are never stored in plain text"] },
+      { "id": "FR-2", "title": "List a tool", "description": "A member lists a tool with name, description, category and whether it is available; they can edit or withdraw it.", "mvp": true, "acceptanceCriteria": ["A listed tool appears in the catalogue", "Only the owner can edit or withdraw a tool"] },
+      { "id": "FR-3", "title": "Browse and search", "description": "Members browse available tools and search by name or category.", "mvp": true, "acceptanceCriteria": ["Search by a word in the name returns matching tools", "Filtering by category works", "Withdrawn tools are not shown"] },
+      { "id": "FR-4", "title": "Request a loan", "description": "A member requests a tool for a start and end date.", "mvp": true, "acceptanceCriteria": ["A request needs a start date not in the past and an end date after it", "A member cannot request their own tool", "Overlapping approved loans are refused"] },
+      { "id": "FR-5", "title": "Approve, decline and return", "description": "The lender approves or declines a request and marks an approved loan as returned.", "mvp": true, "acceptanceCriteria": ["Only the lender can approve, decline or mark returned", "A returned tool becomes available again"] },
+      { "id": "FR-6", "title": "My loans", "description": "Members see what they borrowed and lent, with overdue loans highlighted.", "mvp": true, "acceptanceCriteria": ["Borrowed and lent loans are listed separately", "Loans past their end date and not returned are marked overdue"] },
+      { "id": "FR-7", "title": "Email reminders", "description": "Email reminders for overdue loans.", "mvp": false, "acceptanceCriteria": ["A reminder is sent the day after the end date"] }
+    ],
+    "nonFunctional": [
+      { "id": "NFR-1", "category": "security", "requirement": "Passwords hashed with scrypt; session cookies are HttpOnly, SameSite=Lax and Secure in production; state-changing forms are protected against CSRF.", "mvp": true },
+      { "id": "NFR-2", "category": "accessibility", "requirement": "Pages meet WCAG 2.1 AA for contrast, labels and keyboard use.", "mvp": true },
+      { "id": "NFR-3", "category": "responsive", "requirement": "Every page works on a 360 px wide phone without horizontal scrolling.", "mvp": true },
+      { "id": "NFR-4", "category": "privacy", "requirement": "Only name, email and password hash are stored about a member; emails are not shown to other members.", "mvp": true }
+    ],
+    "userStories": [
+      { "id": "US-1", "asA": "a neighbour", "iWant": "to find a ladder nearby", "soThat": "I do not have to buy one", "requirementIds": ["FR-3", "FR-4"], "acceptanceCriteria": ["I can search for 'ladder' and request one for Saturday"] },
+      { "id": "US-2", "asA": "a lender", "iWant": "to see who has my drill", "soThat": "it comes back", "requirementIds": ["FR-5", "FR-6"], "acceptanceCriteria": ["My lent loans show the borrower's name and end date"] },
+      { "id": "US-3", "asA": "the organiser", "iWant": "only invited neighbours to join", "soThat": "the community stays trusted", "requirementIds": ["FR-1"], "acceptanceCriteria": ["Sign-up requires the invitation code"] }
+    ]
+  },
+  "architecture": {
+    "projectType": "web-app",
+    "platforms": ["website"],
+    "stack": [
+      { "layer": "Runtime", "choice": "Node.js 22 LTS or newer", "rationale": "One language for server and tests; the factory already validates with Node.", "tradeoffs": "Single-threaded; fine for a neighbourhood-sized app.", "alternatives": ["Python with Flask", "Go"] },
+      { "layer": "Web server", "choice": "Node's built-in http module with a small router", "rationale": "No framework dependency to learn or update; pages are simple forms.", "tradeoffs": "More code for routing and forms than a framework would need.", "alternatives": ["Express", "Fastify"] },
+      { "layer": "Rendering", "choice": "Server-rendered HTML with plain CSS", "rationale": "Fast on phones, accessible by default, no build step for a client framework.", "tradeoffs": "Less interactive than a single-page app.", "alternatives": ["React", "Svelte"] },
+      { "layer": "Database", "choice": "SQLite through Node's built-in node:sqlite module", "rationale": "A single file, no separate database server, no monthly cost.", "tradeoffs": "One writer at a time; moving to Postgres would need a data migration.", "alternatives": ["PostgreSQL", "a JSON file"] }
+    ],
+    "frontend": "Server-rendered HTML pages with semantic forms and one shared stylesheet; no client-side framework.",
+    "backend": "A Node.js HTTP server with modules for routing, sessions, members, tools and loans; all input validated on the server.",
+    "database": "SQLite file at DATABASE_PATH with tables member, tool and loan; schema created and upgraded by numbered migration scripts.",
+    "integrations": [
+      { "name": "Email delivery (post-MVP)", "purpose": "Overdue reminders (FR-7), not part of the MVP.", "configKeys": ["SMTP_URL"], "sensitive": true, "paid": false, "verified": false }
+    ],
+    "authentication": "Email and password with scrypt hashing; sign-up requires the invitation code from INVITE_CODE; server-side sessions in SQLite referenced by a signed cookie.",
+    "authorization": "Members only see the catalogue after signing in; only a tool's owner can edit it or decide on its loans; borrowers only see their own requests.",
+    "deployment": "One Node.js process behind the host's HTTPS proxy, with the SQLite file on a persistent volume. Deployment is done by a person following RELEASE_PLAN.md."
+  },
+  "ux": {
+    "screens": [
+      { "id": "SCR-1", "name": "Sign in and sign up", "purpose": "Join with an invitation code or sign in.", "requirementIds": ["FR-1"] },
+      { "id": "SCR-2", "name": "Catalogue", "purpose": "Browse and search available tools.", "requirementIds": ["FR-3"] },
+      { "id": "SCR-3", "name": "Tool details", "purpose": "See a tool and request it for dates.", "requirementIds": ["FR-3", "FR-4"] },
+      { "id": "SCR-4", "name": "My loans", "purpose": "Borrowed and lent loans, with approve, decline and returned actions.", "requirementIds": ["FR-5", "FR-6"] },
+      { "id": "SCR-5", "name": "My tools", "purpose": "List, edit and withdraw my tools.", "requirementIds": ["FR-2"] }
+    ],
+    "navigation": "A top bar with Catalogue, My loans, My tools and Sign out; on phones it wraps onto two lines.",
+    "journeys": [
+      { "name": "Borrow a tool", "steps": ["Sign in", "Search the catalogue", "Open the tool", "Choose dates and request", "See the request under My loans"] },
+      { "name": "Lend a tool", "steps": ["List a tool under My tools", "See a request under My loans", "Approve it", "Mark it returned when it comes back"] }
+    ],
+    "responsive": "Single-column layout below 640 px; forms use full-width inputs; no horizontal scrolling at 360 px.",
+    "accessibility": ["Every input has a visible label", "Colour contrast at least 4.5:1", "All actions reachable by keyboard with a visible focus outline", "Status messages announced with role=status"]
+  },
+  "dataModel": {
+    "entities": [
+      {
+        "name": "Member",
+        "description": "A person in the neighbourhood.",
+        "fields": [
+          { "name": "id", "type": "integer", "required": true, "validation": "primary key" },
+          { "name": "name", "type": "text", "required": true, "validation": "1-80 characters" },
+          { "name": "email", "type": "text", "required": true, "validation": "valid email, unique, stored lower-case" },
+          { "name": "passwordHash", "type": "text", "required": true, "validation": "scrypt hash with salt" },
+          { "name": "createdAt", "type": "datetime", "required": true, "validation": "" }
+        ],
+        "relationships": ["owns many Tools", "borrows through many Loans"],
+        "accessControl": "A member reads and changes only their own account; other members see only the name.",
+        "retention": "Deleted on request together with their tools; loans keep an anonymised placeholder."
+      },
+      {
+        "name": "Tool",
+        "description": "A tool a member is willing to lend.",
+        "fields": [
+          { "name": "id", "type": "integer", "required": true, "validation": "primary key" },
+          { "name": "ownerId", "type": "integer", "required": true, "validation": "existing Member" },
+          { "name": "name", "type": "text", "required": true, "validation": "1-80 characters" },
+          { "name": "description", "type": "text", "required": false, "validation": "at most 1000 characters" },
+          { "name": "category", "type": "text", "required": true, "validation": "one of the fixed categories" },
+          { "name": "withdrawn", "type": "boolean", "required": true, "validation": "" }
+        ],
+        "relationships": ["belongs to one Member", "has many Loans"],
+        "accessControl": "Signed-in members read; only the owner changes or withdraws.",
+        "retention": "Kept while the owner is a member; withdrawn tools are hidden but kept for loan history."
+      },
+      {
+        "name": "Loan",
+        "description": "A request to borrow a tool for dates, and its outcome.",
+        "fields": [
+          { "name": "id", "type": "integer", "required": true, "validation": "primary key" },
+          { "name": "toolId", "type": "integer", "required": true, "validation": "existing Tool not owned by the borrower" },
+          { "name": "borrowerId", "type": "integer", "required": true, "validation": "existing Member" },
+          { "name": "startDate", "type": "date", "required": true, "validation": "not in the past when requested" },
+          { "name": "endDate", "type": "date", "required": true, "validation": "after startDate" },
+          { "name": "status", "type": "text", "required": true, "validation": "requested | approved | declined | returned" }
+        ],
+        "relationships": ["belongs to one Tool", "belongs to one borrowing Member"],
+        "accessControl": "Visible to the borrower and the tool's owner only; only the owner changes the status.",
+        "retention": "Kept for 2 years for history, then deleted."
+      }
+    ]
+  },
+  "testPlan": {
+    "unit": ["Password hashing and verification", "Date validation for loan requests", "Overlap detection for approved loans"],
+    "integration": ["Each route with an in-memory SQLite database: sign-up, listing, search, request, approve, decline, return"],
+    "browser": ["Manual check on a 360 px wide phone and a desktop browser before release"],
+    "security": ["Requests without a session are redirected to sign-in", "A member cannot change another member's tool or loan", "Forms without a valid CSRF token are refused", "Repeated failed sign-ins are slowed down"],
+    "e2e": ["Two members: one lists a drill, the other requests it, the first approves and marks it returned"]
+  },
+  "release": {
+    "hosting": "A small container or virtual server host with HTTPS and a persistent volume for the SQLite file (provider chosen by a person).",
+    "environments": ["development (local)", "production"],
+    "environmentVariables": [
+      { "name": "SESSION_SECRET", "purpose": "Signs session cookies", "secret": true },
+      { "name": "INVITE_CODE", "purpose": "Invitation code required to sign up", "secret": true },
+      { "name": "DATABASE_PATH", "purpose": "Location of the SQLite file", "secret": false },
+      { "name": "PORT", "purpose": "HTTP port", "secret": false },
+      { "name": "SMTP_URL", "purpose": "Email delivery for post-MVP reminders", "secret": true }
+    ],
+    "domains": "Optional custom domain configured by a person at the host; the host's default subdomain works for the pilot.",
+    "migrations": "Numbered SQL migration scripts run at start-up inside a transaction; a backup is taken before deploying a new version.",
+    "backups": "Daily copy of the SQLite file to separate storage, kept for 14 days (set up by a person at the host).",
+    "monitoring": "The host's uptime check on /health and its process logs.",
+    "legal": ["A short privacy notice explaining what personal data is stored and how to be deleted (wording to be checked by a person; not legal advice)"],
+    "publication": ["Share the sign-up link and invitation code in the neighbourhood chat group"]
+  },
+  "commands": [
+    { "name": "test", "executable": "node", "args": ["--test"], "description": "Runs the test suite with Node's test runner" },
+    { "name": "build", "executable": "node", "args": ["--run", "build"], "description": "Runs the package.json build script (syntax check of all modules)" }
+  ],
+  "defaultChecks": ["test", "build"],
+  "tasks": [
+    {
+      "id": "T1", "title": "Project skeleton and health check", "category": "foundation",
+      "scope": "Create package.json (type module, Node >= 22) with a 'build' script that checks every module (node --check), the folder layout src/ and test/, an HTTP server with a /health route reading PORT, and a README section on running it.",
+      "dependencies": [], "acceptanceCriteria": ["node --test passes with a test that starts the server and gets 200 from /health", "node --run build succeeds"],
+      "checks": ["test", "build"], "deliverables": ["package.json", "src/server.js", "test/health.test.js"], "risk": "low", "riskFlags": [],
+      "evidence": ["Passing test output for the health test"], "covers": [], "entities": [], "screens": []
+    },
+    {
+      "id": "T2", "title": "Database and migrations", "category": "foundation",
+      "scope": "Open the SQLite database at DATABASE_PATH with node:sqlite, add a migration runner with numbered SQL scripts, and create the member, tool and loan tables with the constraints from DATA_MODEL.md.",
+      "dependencies": ["T1"], "acceptanceCriteria": ["Migrations run once and are recorded", "Tables enforce required fields and foreign keys", "Tests use an in-memory database"],
+      "checks": ["test", "build"], "deliverables": ["src/db.js", "migrations/001-initial.sql", "test/db.test.js"], "risk": "medium", "riskFlags": ["migration"],
+      "evidence": ["Test output showing migrations applied to an empty database"], "covers": [], "entities": ["Member", "Tool", "Loan"], "screens": []
+    },
+    {
+      "id": "T3", "title": "Member sign-up, sign-in and sessions", "category": "feature",
+      "scope": "Sign-up with invitation code (INVITE_CODE), scrypt password hashing, sign-in and sign-out, server-side sessions with a signed cookie (SESSION_SECRET), and the sign-in/sign-up page.",
+      "dependencies": ["T2"], "acceptanceCriteria": ["Sign-up without the invitation code is refused", "Wrong passwords are refused", "Signed-out visitors are redirected to sign-in", "Passwords are stored only as scrypt hashes"],
+      "checks": ["test", "build"], "deliverables": ["src/auth.js", "src/sessions.js", "src/views/sign-in.js", "test/auth.test.js"], "risk": "high", "riskFlags": ["authentication", "personal-data", "secrets"],
+      "evidence": ["Tests for sign-up, sign-in, sign-out and refused attempts"], "covers": ["FR-1", "NFR-4"], "entities": ["Member"], "screens": ["SCR-1"]
+    },
+    {
+      "id": "T4", "title": "List, edit and withdraw tools", "category": "feature",
+      "scope": "My tools page where a member lists a tool (name, description, category), edits it and withdraws it; only the owner may change a tool.",
+      "dependencies": ["T3"], "acceptanceCriteria": ["A listed tool is stored with its owner", "Another member's edit attempt gets 403", "Withdrawn tools stay in the database but are marked withdrawn"],
+      "checks": ["test", "build"], "deliverables": ["src/tools.js", "src/views/my-tools.js", "test/tools.test.js"], "risk": "medium", "riskFlags": ["authorization"],
+      "evidence": ["Tests for create, edit, withdraw and the 403 case"], "covers": ["FR-2"], "entities": ["Tool"], "screens": ["SCR-5"]
+    },
+    {
+      "id": "T5", "title": "Catalogue, search and tool details", "category": "feature",
+      "scope": "Catalogue page listing available tools with search by name and filter by category, and a tool details page.",
+      "dependencies": ["T4"], "acceptanceCriteria": ["Search matches part of a tool name, case-insensitive", "Category filter works", "Withdrawn tools are never listed"],
+      "checks": ["test", "build"], "deliverables": ["src/catalogue.js", "src/views/catalogue.js", "src/views/tool.js", "test/catalogue.test.js"], "risk": "low", "riskFlags": [],
+      "evidence": ["Tests for search, filter and hidden withdrawn tools"], "covers": ["FR-3"], "entities": ["Tool"], "screens": ["SCR-2", "SCR-3"]
+    },
+    {
+      "id": "T6", "title": "Loan requests", "category": "feature",
+      "scope": "Request form on the tool details page with start and end dates; validation of dates, own tools and overlapping approved loans.",
+      "dependencies": ["T5"], "acceptanceCriteria": ["Past start dates and end dates before start are refused", "Requesting one's own tool is refused", "A request overlapping an approved loan is refused"],
+      "checks": ["test", "build"], "deliverables": ["src/loans.js", "test/loan-requests.test.js"], "risk": "medium", "riskFlags": ["authorization"],
+      "evidence": ["Tests for each refusal rule and a valid request"], "covers": ["FR-4"], "entities": ["Loan"], "screens": ["SCR-3"]
+    },
+    {
+      "id": "T7", "title": "Decide on loans and My loans page", "category": "feature",
+      "scope": "My loans page with borrowed and lent sections, overdue highlighting, and approve, decline and mark-returned actions for the lender.",
+      "dependencies": ["T6"], "acceptanceCriteria": ["Only the tool owner can approve, decline or mark returned", "Returned tools are available again", "Overdue loans are marked"],
+      "checks": ["test", "build"], "deliverables": ["src/views/my-loans.js", "test/loan-decisions.test.js"], "risk": "medium", "riskFlags": ["authorization"],
+      "evidence": ["Tests for each action, the permission check and overdue marking"], "covers": ["FR-5", "FR-6"], "entities": ["Loan"], "screens": ["SCR-4"]
+    },
+    {
+      "id": "T8", "title": "Responsive and accessible pages", "category": "feature",
+      "scope": "Shared layout and stylesheet: navigation bar, single-column layout below 640 px, labels, focus outlines, contrast and status messages on every page.",
+      "dependencies": ["T7"], "acceptanceCriteria": ["Every form input has a label element", "No fixed widths above 360 px", "Status messages use role=status"],
+      "checks": ["test", "build"], "deliverables": ["src/views/layout.js", "public/styles.css", "test/markup.test.js"], "risk": "low", "riskFlags": [],
+      "evidence": ["Markup tests for labels and roles", "Screenshot or notes from a 360 px check in the review"], "covers": ["NFR-2", "NFR-3"], "entities": [], "screens": ["SCR-1", "SCR-2", "SCR-3", "SCR-4", "SCR-5"]
+    },
+    {
+      "id": "T9", "title": "Security hardening", "category": "security",
+      "scope": "CSRF tokens on every form, security headers (CSP, frame denial, nosniff), slowing repeated failed sign-ins, and cookie flags for production.",
+      "dependencies": ["T7"], "acceptanceCriteria": ["Forms without a valid CSRF token get 403", "Responses carry the security headers", "The sixth failed sign-in within 10 minutes is delayed"],
+      "checks": ["test", "build"], "deliverables": ["src/security.js", "test/security.test.js"], "risk": "high", "riskFlags": ["authentication", "secrets"],
+      "evidence": ["Security test output"], "covers": ["NFR-1"], "entities": [], "screens": []
+    },
+    {
+      "id": "T10", "title": "End-to-end borrowing test", "category": "testing",
+      "scope": "One test that runs the server with a temporary database and plays the borrow journey with two members through HTTP requests.",
+      "dependencies": ["T8", "T9"], "acceptanceCriteria": ["The full journey passes: list, search, request, approve, return", "The test cleans up its temporary database"],
+      "checks": ["test"], "deliverables": ["test/e2e-borrow.test.js"], "risk": "low", "riskFlags": [],
+      "evidence": ["Passing end-to-end test output"], "covers": ["FR-1", "FR-3", "FR-4", "FR-5"], "entities": [], "screens": []
+    },
+    {
+      "id": "T11", "title": "Release preparation", "category": "release",
+      "scope": "Write DEPLOY.md (host requirements, environment variables, backups, migrations, privacy notice draft) and .env.example with variable names only. Nothing is deployed.",
+      "dependencies": ["T10"], "acceptanceCriteria": [".env.example lists every variable from RELEASE_PLAN.md without values", "DEPLOY.md covers start-up, migrations, backups and monitoring"],
+      "checks": ["test", "build"], "deliverables": ["DEPLOY.md", ".env.example", "PRIVACY.md"], "risk": "medium", "riskFlags": ["deployment", "legal"],
+      "evidence": ["The documents in the review diff"], "covers": [], "entities": [], "screens": []
+    }
+  ],
+  "statements": [
+    { "statement": "The residents' chat group gets about 10 tool requests per week.", "basis": "user-provided", "sourceIds": ["SRC-1"] },
+    { "statement": "Hosting a small Node.js app with SQLite fits in the 10 USD monthly budget.", "basis": "assumption", "sourceIds": [] },
+    { "statement": "node:sqlite is available without flags in current Node.js 22 and 24 releases.", "basis": "assumption", "sourceIds": [] },
+    { "statement": "Server-rendered pages without a client framework are enough for this MVP.", "basis": "recommendation", "sourceIds": [] }
+  ],
+  "sources": [
+    { "id": "SRC-1", "title": "Notes supplied with the idea", "kind": "user-supplied", "url": "", "retrievedAt": "", "notes": "Chat group observations from the organiser." }
+  ],
+  "openQuestions": ["Should members see each other's email addresses, or only names? (Assumed: names only.)"],
+  "feasibility": { "feasible": true, "issues": [] }
+}

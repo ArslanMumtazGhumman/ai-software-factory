@@ -695,7 +695,7 @@ describe('dashboard', () => {
       assert.equal(controls.limits.runBudgetUsd, 3);
       assert.match(controls.limits.budgetNote, /not a hard guarantee/);
       const res = await post(`${api}/runs/start`, { confirm: true });
-      assert.equal(res.status, 200);
+      assert.equal(res.status, 200, res.text);
       const record = await launcher.done!;
       assert.equal(record.state, 'completed', JSON.stringify(record.stop));
       const run = (await get(`${api}/runs/${record.autoRunId}`)).json;

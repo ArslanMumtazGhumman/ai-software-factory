@@ -9,12 +9,16 @@ import { isRecord } from '../core/validation.js';
 import { redactSecrets } from '../security/redact.js';
 import { RUN_ID, TASK_ID } from '../tasks/task.js';
 import { PROJECT_ID } from './projects.js';
-import { safeMessage, type DashboardService } from './service.js';
+import type { PlanningService } from '../planning/planningService.js';
+import { planDetailView, planSummaryView, workspaceView } from './planningViews.js';
+import { ConflictError, NotFoundError, safeMessage, type DashboardService } from './service.js';
 
 /** The dashboard only ever listens on the loopback interface. There is no option to change this. */
 export const DASHBOARD_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 4317;
 export const MAX_BODY_BYTES = 16 * 1024;
+/** An idea may include pasted research notes. */
+export const MAX_IDEA_BODY_BYTES = 256 * 1024;
 export const TOKEN_HEADER = 'x-asf-token';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../../../src/dashboard/public/', import.meta.url));
@@ -113,8 +117,10 @@ interface Route {
   method: 'GET' | 'POST';
   pattern: RegExp;
   /** Names of the captured groups, validated before the handler runs. */
-  params: readonly ('pid' | 'tid' | 'rid' | 'kind')[];
+  params: readonly ('pid' | 'tid' | 'rid' | 'kind' | 'plan' | 'doc')[];
   handler: (service: DashboardService, p: Record<string, string>, body: Body) => Promise<unknown>;
+  /** Body size limit for this route (default MAX_BODY_BYTES). */
+  maxBody?: number;
 }
 
 const SEG = '([^/]+)';
@@ -187,9 +193,81 @@ const routes: Route[] = [
       return s.reject(p.pid!, p.tid!, { runId: str(b, 'runId', RUN_ID, 'runId'), diffSha256: str(b, 'diffSha256', SHA256, 'diffSha256'), reason });
     },
   },
+  // ------------------------------------------------ idea-to-project planning
+  { method: 'GET', pattern: /^\/api\/workspace$/, params: [], handler: async (s) => workspaceView(s.planning) },
+  { method: 'GET', pattern: /^\/api\/plans$/, params: [], handler: async (s) => ({ plans: await Promise.all((await planning(s).list()).map(planSummaryView)) }) },
+  { method: 'GET', pattern: new RegExp(`^/api/plans/${SEG}$`), params: ['plan'], handler: (s, p) => planDetailView(planning(s), p.plan!) },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/plans/${SEG}/documents/${SEG}$`),
+    params: ['plan', 'doc'],
+    handler: async (s, p) => {
+      const content = await planning(s).document(p.plan!, p.doc!);
+      if (content === undefined) throw new NotFoundError('This document has not been generated yet.');
+      return { name: p.doc, content: redactSecrets(content) };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/plans$/,
+    params: [],
+    maxBody: MAX_IDEA_BODY_BYTES,
+    handler: async (s, _p, b) => {
+      only(b, ['requestId', 'confirm', 'idea']);
+      requireConfirm(b);
+      const record = await planning(s).create(b.idea);
+      return { planId: record.planId, state: record.state, message: 'Idea saved. The planner is preparing a proposal.' };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/plans/${SEG}/(approve|reject|answer|retry)$`),
+    params: ['plan', 'kind'],
+    handler: async (s, p, b) => {
+      const svc = planning(s);
+      const id = p.plan!;
+      switch (p.kind) {
+        case 'approve':
+          only(b, ['requestId', 'confirm']);
+          requireConfirm(b);
+          await svc.approve(id);
+          return { message: 'Approved. The plan is being finalized, validated and set up as a project.' };
+        case 'reject': {
+          only(b, ['requestId', 'confirm', 'reason']);
+          requireConfirm(b);
+          const reason = typeof b.reason === 'string' ? b.reason : '';
+          if (reason.trim().length === 0 || reason.length > 2000) throw new ValidationError('A reason (1-2000 characters) is required.');
+          await svc.reject(id, reason);
+          return { message: 'The idea was rejected. Its records are kept.' };
+        }
+        case 'answer':
+          only(b, ['requestId', 'answer']);
+          if (typeof b.answer !== 'string') throw new ValidationError('An answer is required.');
+          await svc.answer(id, b.answer);
+          return { message: 'Thanks. The planner is preparing the proposal again.' };
+        default:
+          only(b, ['requestId', 'confirm']);
+          requireConfirm(b);
+          await svc.retry(id);
+          return { message: 'Retrying the failed step.' };
+      }
+    },
+  },
 ];
 
-const PARAM_PATTERNS: Record<string, RegExp> = { pid: PROJECT_ID, tid: TASK_ID, rid: RUN_ID, kind: /^(pause|stop)$/ };
+function planning(s: DashboardService): PlanningService {
+  if (s.planning === undefined) throw new ConflictError('Planning is not enabled: start the dashboard with --workspace <factory.workspace.json>.');
+  return s.planning;
+}
+
+const PARAM_PATTERNS: Record<string, RegExp> = {
+  pid: PROJECT_ID,
+  tid: TASK_ID,
+  rid: RUN_ID,
+  kind: /^(pause|stop|approve|reject|answer|retry)$/,
+  plan: RUN_ID,
+  doc: /^[A-Z_]{3,20}.(md|json)$/,
+};
 
 function matchRoute(method: string, pathname: string): { route: Route; params: Record<string, string> } {
   let invalid: HttpError | undefined;
@@ -297,7 +375,7 @@ export async function startDashboardServer(options: DashboardServerOptions): Pro
     const origin = req.headers.origin;
     if (origin === undefined || !allowedOrigins().includes(origin.toLowerCase())) throw new HttpError(403, 'Requests must come from the dashboard page itself.');
     if (!/^application\/json(;|$)/i.test(req.headers['content-type'] ?? '')) throw new HttpError(415, 'Content-Type must be application/json.');
-    const body = await readBody(req);
+    const body = await readBody(req, route.maxBody ?? MAX_BODY_BYTES);
     const requestId = body.requestId;
     if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) throw new HttpError(400, 'requestId is missing or invalid.');
     const key = `${pathname}`;
@@ -364,8 +442,8 @@ function errorResponse(err: unknown, log: (line: string) => void): { status: num
   return { status: 500, body: { error: { code: 'INTERNAL', message: safeMessage(err) } } };
 }
 
-async function readBody(req: http.IncomingMessage): Promise<Body> {
-  if (Number(req.headers['content-length'] ?? 0) > MAX_BODY_BYTES) {
+async function readBody(req: http.IncomingMessage, limit: number): Promise<Body> {
+  if (Number(req.headers['content-length'] ?? 0) > limit) {
     req.resume();
     throw new HttpError(413, 'Request body too large.');
   }
@@ -374,9 +452,9 @@ async function readBody(req: http.IncomingMessage): Promise<Body> {
   // Keep draining an oversized body (without storing it) so the error response can still be sent.
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size <= MAX_BODY_BYTES) chunks.push(chunk as Buffer);
+    if (size <= limit) chunks.push(chunk as Buffer);
   }
-  if (size > MAX_BODY_BYTES) throw new HttpError(413, 'Request body too large.');
+  if (size > limit) throw new HttpError(413, 'Request body too large.');
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));

@@ -1,0 +1,40 @@
+{
+  "productName": "Tool Share",
+  "summary": "A mobile-friendly web app for one neighbourhood: members list tools they lend, browse and request available tools, and the lender approves the loan and marks it returned, so everyone can see who has what.",
+  "problem": "Tool requests are scattered across a chat group, nobody knows who has which tool, and lent tools go missing.",
+  "targetUsers": ["Neighbourhood members who lend and borrow tools", "A volunteer organiser who invites members"],
+  "valueProposition": "Find a tool nearby in seconds and always know where lent tools are.",
+  "projectType": "web-app",
+  "platforms": ["website"],
+  "mvpScope": [
+    "Member sign-up and sign-in with an invitation code",
+    "List a tool with a photo-free description and availability",
+    "Browse and search the neighbourhood catalogue",
+    "Request a loan for dates",
+    "Lender approves or declines, and marks the tool returned",
+    "My loans: what I borrowed and lent"
+  ],
+  "outOfScope": ["Payments or deposits", "Email notifications", "Native mobile apps", "Multiple neighbourhoods"],
+  "effort": { "estimatedTasks": 11, "complexity": "medium", "notes": "One small server-rendered web app with a SQLite database." },
+  "recurringCosts": [
+    { "item": "Small virtual server or container host", "estimate": "about 5 USD per month", "basis": "assumption", "notes": "Typical entry-level price; not checked for a specific provider." },
+    { "item": "Domain name", "estimate": "about 10-15 USD per year", "basis": "assumption", "notes": "Optional; a provider subdomain also works." }
+  ],
+  "risks": [
+    { "risk": "Members stop recording returns, so the loan list goes stale", "severity": "medium", "mitigation": "Overdue loans are highlighted to both members on their loan page." },
+    { "risk": "Personal data of neighbours is exposed", "severity": "high", "mitigation": "Invitation-only sign-up, minimal data, hashed passwords, sessions with secure cookies." },
+    { "risk": "Demand beyond the chat group is unproven", "severity": "low", "mitigation": "Start with one neighbourhood and measure loans per week." }
+  ],
+  "statements": [
+    { "statement": "The residents' chat group gets about 10 tool requests per week.", "basis": "user-provided", "sourceIds": ["SRC-1"] },
+    { "statement": "Two drills went missing this year because loans were not tracked.", "basis": "user-provided", "sourceIds": ["SRC-1"] },
+    { "statement": "Hosting a small Node.js app with SQLite fits in the 10 USD monthly budget.", "basis": "assumption", "sourceIds": [] },
+    { "statement": "Use invitation codes instead of open sign-up to keep the community closed.", "basis": "recommendation", "sourceIds": [] }
+  ],
+  "sources": [
+    { "id": "SRC-1", "title": "Notes supplied with the idea", "kind": "user-supplied", "url": "", "retrievedAt": "", "notes": "Chat group observations from the organiser." }
+  ],
+  "openQuestions": ["Should members see each other's email addresses, or only names?"],
+  "blockingQuestion": "",
+  "feasibility": { "feasible": true, "issues": [] }
+}

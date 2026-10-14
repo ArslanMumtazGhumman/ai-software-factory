@@ -1,0 +1,14 @@
+{
+  "name": "Tool Share",
+  "idea": "Neighbours own many tools they rarely use, while others buy the same tools for a single job. A small web app where members of one neighbourhood list tools they are willing to lend, browse what is available nearby, request a loan and track who has what, so fewer tools are bought and borrowed tools come back.",
+  "targetUsers": "Residents of one neighbourhood or apartment building; a volunteer organiser who invites members.",
+  "market": "Local community groups. Starting with one neighbourhood of 50-200 households.",
+  "research": "Our residents' WhatsApp group gets about 10 'does anyone have a ...' messages a week. Loans are tracked nowhere, and two drills have gone missing this year. Members asked for something simpler than a spreadsheet.",
+  "referenceUrls": [],
+  "businessModel": "Free for members. Running costs should stay under 10 USD per month; later possibly a small donation link.",
+  "platforms": ["website"],
+  "constraints": "Must work well on phones. Keep personal data to a minimum (name, email, neighbourhood). No payments in the MVP.",
+  "budget": "Hosting under 10 USD per month.",
+  "preferredTech": "",
+  "existingCodebasePath": ""
+}
